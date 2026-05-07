@@ -1,6 +1,120 @@
 # claude-billing: switch Claude Code between billing modes (subscription, API, Bedrock)
 # Config: ~/.claude-billing.conf
-# Requires: jq, macOS Keychain (security), aws CLI (for Bedrock)
+# Requires: jq, aws CLI (for Bedrock)
+# macOS: uses Keychain (security CLI)
+# Linux: uses GNOME Keyring (secret-tool)
+# Windows (Git Bash): uses ~/.claude-billing-credentials (chmod 600)
+
+# --- Platform detection ---
+
+_cb_platform() {
+  case "$(uname -s)" in
+    Darwin)             echo "macos" ;;
+    Linux)              echo "linux" ;;
+    MINGW*|MSYS*|CYGWIN*) echo "windows" ;;
+    *)                  echo "unknown" ;;
+  esac
+}
+
+# --- Credential storage abstraction ---
+
+_cb_cred_store() {
+  local service="$1" value="$2"
+  case "$(_cb_platform)" in
+    macos)
+      security add-generic-password -s "$service" -a "$USER" -w "$value" 2>/dev/null || \
+        security add-generic-password -U -s "$service" -a "$USER" -w "$value" 2>/dev/null
+      ;;
+    linux)
+      echo -n "$value" | secret-tool store --label="$service" service "$service" account "$USER" 2>/dev/null
+      ;;
+    windows)
+      _cb_cred_file_store "$service" "$value"
+      ;;
+  esac
+}
+
+_cb_cred_retrieve() {
+  local service="$1"
+  case "$(_cb_platform)" in
+    macos)
+      security find-generic-password -s "$service" -a "$USER" -w 2>/dev/null
+      ;;
+    linux)
+      secret-tool lookup service "$service" account "$USER" 2>/dev/null
+      ;;
+    windows)
+      _cb_cred_file_retrieve "$service"
+      ;;
+  esac
+}
+
+_cb_cred_delete() {
+  local service="$1"
+  case "$(_cb_platform)" in
+    macos)
+      security delete-generic-password -s "$service" -a "$USER" 2>/dev/null
+      ;;
+    linux)
+      secret-tool clear service "$service" account "$USER" 2>/dev/null
+      ;;
+    windows)
+      _cb_cred_file_delete "$service"
+      ;;
+  esac
+}
+
+# Windows: permission-restricted credential file fallback
+_cb_cred_file_store() {
+  local service="$1" value="$2"
+  local cred_file="$HOME/.claude-billing-credentials"
+  touch "$cred_file" && chmod 600 "$cred_file"
+  local existing
+  existing=$(grep -v "^${service}=" "$cred_file" 2>/dev/null)
+  printf '%s\n' "$existing" > "$cred_file"
+  echo "${service}=${value}" >> "$cred_file"
+}
+
+_cb_cred_file_retrieve() {
+  local service="$1"
+  local cred_file="$HOME/.claude-billing-credentials"
+  grep "^${service}=" "$cred_file" 2>/dev/null | cut -d= -f2-
+}
+
+_cb_cred_file_delete() {
+  local service="$1"
+  local cred_file="$HOME/.claude-billing-credentials"
+  [[ -f "$cred_file" ]] || return
+  local existing
+  existing=$(grep -v "^${service}=" "$cred_file")
+  printf '%s\n' "$existing" > "$cred_file"
+}
+
+# --- OAuth backup / restore ---
+
+_claude_billing_backup_oauth() {
+  local oauth
+  oauth=$(_cb_cred_retrieve "Claude Code-credentials")
+  if [[ -n "$oauth" ]]; then
+    # Only overwrite backup if we have a live token — prevents clobbering a valid backup
+    _cb_cred_store "Claude Code-credentials-backup" "$oauth"
+    _cb_cred_delete "Claude Code-credentials"
+  fi
+}
+
+_claude_billing_restore_oauth() {
+  local backup
+  backup=$(_cb_cred_retrieve "Claude Code-credentials-backup")
+  if [[ -n "$backup" ]]; then
+    _cb_cred_store "Claude Code-credentials" "$backup"
+    _cb_cred_delete "Claude Code-credentials-backup"
+    echo "Restored claude.ai OAuth token"
+  else
+    echo "No OAuth backup found — run 'claude /login' after launching Claude Code to authenticate with your subscription"
+  fi
+}
+
+# --- Main function ---
 
 claude-billing() {
   local settings="$HOME/.claude/settings.json"
@@ -17,10 +131,14 @@ claude-billing() {
   case "$1" in
     api)
       local key
-      key=$(security find-generic-password -s "anthropic-api-key" -a "$USER" -w 2>/dev/null)
+      key=$(_cb_cred_retrieve "anthropic-api-key")
       if [[ -z "$key" ]]; then
-        echo "No Anthropic API key found in Keychain. Add it with:"
-        echo "  security add-generic-password -s anthropic-api-key -a \"\$USER\" -w"
+        echo "No Anthropic API key found in credential store. Add it with:"
+        case "$(_cb_platform)" in
+          macos)   echo "  security add-generic-password -s anthropic-api-key -a \"\$USER\" -w" ;;
+          linux)   echo "  secret-tool store --label=anthropic-api-key service anthropic-api-key account \$USER" ;;
+          windows) echo "  claude-billing add-key" ;;
+        esac
         return 1
       fi
       jq --arg key "$key" '
@@ -83,57 +201,40 @@ claude-billing() {
       fi
       ;;
 
+    add-key)
+      echo -n "Enter your Anthropic API key: "
+      read -rs key
+      echo ""
+      _cb_cred_store "anthropic-api-key" "$key"
+      echo "API key saved"
+      ;;
+
     config)
       _claude_billing_configure
       ;;
 
     *)
-      echo "Usage: claude-billing [subscription|api|bedrock|status|config]"
+      echo "Usage: claude-billing [subscription|api|bedrock|status|config|add-key]"
       echo ""
       echo "  subscription  Use claude.ai subscription (Pro, Max, Teams, Enterprise)"
       echo "  api           Use Anthropic API key billing"
       echo "  bedrock       Use AWS Bedrock"
       echo "  status        Show current billing mode"
       echo "  config        Reconfigure Bedrock region and model IDs"
+      echo "  add-key       Save your Anthropic API key to the credential store"
       ;;
   esac
-}
-
-_claude_billing_backup_oauth() {
-  local oauth
-  oauth=$(security find-generic-password -s "Claude Code-credentials" -a "$USER" -w 2>/dev/null)
-  if [[ -n "$oauth" ]]; then
-    # Only overwrite backup if we have a live token to save — prevents clobbering a valid backup
-    security add-generic-password -s "Claude Code-credentials-backup" -a "$USER" -w "$oauth" 2>/dev/null || \
-      security add-generic-password -U -s "Claude Code-credentials-backup" -a "$USER" -w "$oauth" 2>/dev/null
-    security delete-generic-password -s "Claude Code-credentials" -a "$USER" 2>/dev/null
-  fi
-}
-
-_claude_billing_restore_oauth() {
-  local backup
-  backup=$(security find-generic-password -s "Claude Code-credentials-backup" -a "$USER" -w 2>/dev/null)
-  if [[ -n "$backup" ]]; then
-    security add-generic-password -s "Claude Code-credentials" -a "$USER" -w "$backup" 2>/dev/null || \
-      security add-generic-password -U -s "Claude Code-credentials" -a "$USER" -w "$backup" 2>/dev/null
-    security delete-generic-password -s "Claude Code-credentials-backup" -a "$USER" 2>/dev/null
-    echo "Restored claude.ai OAuth token"
-  else
-    echo "No OAuth backup found — run 'claude /login' after launching Claude Code to authenticate with your subscription"
-  fi
 }
 
 _claude_billing_configure() {
   echo "=== claude-billing configuration ==="
   echo ""
 
-  # Region
   local default_region="${CLAUDE_BILLING_REGION:-us-east-1}"
   echo -n "AWS region for Bedrock [$default_region]: "
   read -r region
   region="${region:-$default_region}"
 
-  # Fetch available Claude models from Bedrock
   echo ""
   echo "Fetching available Claude models in $region..."
   local models
@@ -184,7 +285,6 @@ _claude_billing_configure() {
   opus=$(_claude_billing_pick_model "Opus" "${CLAUDE_BILLING_OPUS:-}" "$models")
   haiku=$(_claude_billing_pick_model "Haiku" "${CLAUDE_BILLING_HAIKU:-}" "$models")
 
-  # Write config
   cat > "$HOME/.claude-billing.conf" <<EOF
 CLAUDE_BILLING_REGION="$region"
 CLAUDE_BILLING_SONNET="$sonnet"
