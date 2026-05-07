@@ -4,7 +4,7 @@ Switch [Claude Code](https://claude.ai/code) between billing modes from the term
 
 | Mode | Description |
 |------|-------------|
-| `pro` | Claude Pro / Max subscription (claude.ai login) |
+| `subscription` | claude.ai subscription — Pro, Max, Teams, or Enterprise |
 | `api` | Anthropic API key (pay-per-use) |
 | `bedrock` | AWS Bedrock |
 
@@ -29,11 +29,11 @@ source ~/.zshrc   # or ~/.bashrc
 ## Usage
 
 ```sh
-claude-billing pro      # switch to Claude Pro / Max
-claude-billing api      # switch to Anthropic API billing
-claude-billing bedrock  # switch to AWS Bedrock
-claude-billing status   # show current mode
-claude-billing config   # reconfigure Bedrock region and model IDs
+claude-billing subscription  # switch to claude.ai subscription (Pro, Max, Teams, Enterprise)
+claude-billing api           # switch to Anthropic API billing
+claude-billing bedrock       # switch to AWS Bedrock
+claude-billing status        # show current mode
+claude-billing config        # reconfigure Bedrock region and model IDs
 ```
 
 Restart Claude Code after switching for changes to take effect.
@@ -41,7 +41,7 @@ Restart Claude Code after switching for changes to take effect.
 ## How it works
 
 - Edits `~/.claude/settings.json` to set the correct env vars and model IDs for each mode
-- Backs up and restores your claude.ai OAuth token to/from Keychain so you don't need to re-login when switching back to Pro
+- Backs up and restores your claude.ai OAuth token to/from Keychain so you don't need to re-login when switching back to your subscription
 - Bedrock model IDs are fetched live from `aws bedrock list-foundation-models` during setup so they're always valid for your region
 
 ## Bedrock model IDs

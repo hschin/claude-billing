@@ -1,4 +1,4 @@
-# claude-billing: switch Claude Code between billing modes (Pro, API, Bedrock)
+# claude-billing: switch Claude Code between billing modes (subscription, API, Bedrock)
 # Config: ~/.claude-billing.conf
 # Requires: jq, macOS Keychain (security), aws CLI (for Bedrock)
 
@@ -35,7 +35,7 @@ claude-billing() {
       echo "Switched to API usage billing — restart Claude Code to apply"
       ;;
 
-    pro)
+    subscription)
       jq '
         .env |= (
           del(.CLAUDE_CODE_USE_BEDROCK) |
@@ -45,7 +45,7 @@ claude-billing() {
           del(.ANTHROPIC_DEFAULT_HAIKU_MODEL)
         )' "$settings" > "$settings.tmp" && mv "$settings.tmp" "$settings"
       _claude_billing_restore_oauth
-      echo "Switched to Claude Pro plan — restart Claude Code to apply"
+      echo "Switched to claude.ai subscription — restart Claude Code to apply"
       ;;
 
     bedrock)
@@ -79,7 +79,7 @@ claude-billing() {
       elif [[ -n "$api_key" ]]; then
         echo "Current: API usage billing"
       else
-        echo "Current: Claude Pro plan"
+        echo "Current: claude.ai subscription"
       fi
       ;;
 
@@ -88,13 +88,13 @@ claude-billing() {
       ;;
 
     *)
-      echo "Usage: claude-billing [api|pro|bedrock|status|config]"
+      echo "Usage: claude-billing [subscription|api|bedrock|status|config]"
       echo ""
-      echo "  api      Use Anthropic API key billing"
-      echo "  pro      Use Claude Pro / Max subscription"
-      echo "  bedrock  Use AWS Bedrock"
-      echo "  status   Show current billing mode"
-      echo "  config   Reconfigure Bedrock region and model IDs"
+      echo "  subscription  Use claude.ai subscription (Pro, Max, Teams, Enterprise)"
+      echo "  api           Use Anthropic API key billing"
+      echo "  bedrock       Use AWS Bedrock"
+      echo "  status        Show current billing mode"
+      echo "  config        Reconfigure Bedrock region and model IDs"
       ;;
   esac
 }
@@ -119,7 +119,7 @@ _claude_billing_restore_oauth() {
     security delete-generic-password -s "Claude Code-credentials-backup" -a "$USER" 2>/dev/null
     echo "Restored claude.ai OAuth token"
   else
-    echo "No OAuth backup found — run 'claude /login' after launching Claude Code to authenticate with your Pro plan"
+    echo "No OAuth backup found — run 'claude /login' after launching Claude Code to authenticate with your subscription"
   fi
 }
 
