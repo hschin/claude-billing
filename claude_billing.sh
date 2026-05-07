@@ -103,6 +103,7 @@ _claude_billing_backup_oauth() {
   local oauth
   oauth=$(security find-generic-password -s "Claude Code-credentials" -a "$USER" -w 2>/dev/null)
   if [[ -n "$oauth" ]]; then
+    # Only overwrite backup if we have a live token to save — prevents clobbering a valid backup
     security add-generic-password -s "Claude Code-credentials-backup" -a "$USER" -w "$oauth" 2>/dev/null || \
       security add-generic-password -U -s "Claude Code-credentials-backup" -a "$USER" -w "$oauth" 2>/dev/null
     security delete-generic-password -s "Claude Code-credentials" -a "$USER" 2>/dev/null
@@ -118,7 +119,7 @@ _claude_billing_restore_oauth() {
     security delete-generic-password -s "Claude Code-credentials-backup" -a "$USER" 2>/dev/null
     echo "Restored claude.ai OAuth token"
   else
-    echo "No OAuth backup found — you may need to run: claude /login"
+    echo "No OAuth backup found — run 'claude /login' after launching Claude Code to authenticate with your Pro plan"
   fi
 }
 
