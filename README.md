@@ -1,12 +1,14 @@
-# claude-billing
+# Easy Claude Code Billing Mode Switcher
 
-Switch [Claude Code](https://claude.ai/code) between billing modes from the terminal.
+A shell utility for switching [Claude Code](https://claude.ai/code) between billing modes without manually editing config files. Install once, switch instantly.
 
 | Mode | Description |
 |------|-------------|
 | `subscription` | claude.ai subscription — Pro, Max, Teams, or Enterprise |
 | `api` | Anthropic API key (pay-per-use) |
 | `bedrock` | AWS Bedrock |
+
+Each switch edits `~/.claude/settings.json` and handles credential backup and restore automatically.
 
 ## Requirements
 
@@ -29,6 +31,14 @@ Then reload your shell:
 ```sh
 source ~/.zshrc   # or ~/.bashrc
 ```
+
+## Uninstall
+
+```sh
+claude-billing uninstall
+```
+
+Removes `~/.claude-billing/`, `~/.claude-billing.conf`, and the source line from your shell RC file. Open a new shell to complete removal.
 
 ## Usage
 
