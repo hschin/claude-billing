@@ -100,10 +100,10 @@ source "$FUNC_FILE"
 # Platform-specific API key setup
 echo ""
 printf "Do you want to save your Anthropic API key now? [y/N]: "
-read -r save_key </dev/tty
+_cb_read -r save_key
 if [[ "$save_key" =~ ^[Yy]$ ]]; then
   printf "Enter your Anthropic API key: "
-  read -rs key </dev/tty
+  _cb_read -rs key
   echo ""
   _cb_cred_store "anthropic-api-key" "$key"
   echo "API key saved"
@@ -112,7 +112,7 @@ fi
 # Bedrock setup
 echo ""
 printf "Set up Bedrock models now? [y/N]: "
-read -r setup_bedrock </dev/tty
+_cb_read -r setup_bedrock
 
 if [[ "$setup_bedrock" =~ ^[Yy]$ ]]; then
   _claude_billing_configure

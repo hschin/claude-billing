@@ -5,6 +5,16 @@
 # Linux: uses GNOME Keyring (secret-tool)
 # Windows (Git Bash): uses ~/.claude-billing-credentials (chmod 600)
 
+# --- Helpers ---
+
+_cb_read() {
+  if [ -r /dev/tty ]; then
+    read "$@" </dev/tty
+  else
+    read "$@"
+  fi
+}
+
 # --- Platform detection ---
 
 _cb_platform() {
@@ -203,7 +213,7 @@ claude_billing() {
 
     add-key)
       printf "Enter your Anthropic API key: "
-      read -rs key </dev/tty
+      _cb_read -rs key
       echo ""
       _cb_cred_store "anthropic-api-key" "$key"
       echo "API key saved"
@@ -232,7 +242,7 @@ _claude_billing_configure() {
 
   local default_region="${CLAUDE_BILLING_REGION:-us-east-1}"
   printf "AWS region for Bedrock [%s]: " "$default_region"
-  read -r region </dev/tty
+  _cb_read -r region
   region="${region:-$default_region}"
 
   echo ""
@@ -269,7 +279,7 @@ _claude_billing_configure() {
     else
       printf "%s model ID [%s]: " "$label" "$default"
     fi
-    read -r input </dev/tty
+    _cb_read -r input
 
     if [[ -z "$input" ]]; then
       echo "$default"
