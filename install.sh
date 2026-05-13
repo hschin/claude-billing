@@ -125,6 +125,8 @@ CLAUDE_BILLING_REGION=""
 CLAUDE_BILLING_SONNET=""
 CLAUDE_BILLING_OPUS=""
 CLAUDE_BILLING_HAIKU=""
+CLAUDE_BILLING_AWS_PROFILE_MODE="inherit"
+CLAUDE_BILLING_AWS_PROFILE=""
 EOF
   echo "Skipped. Run 'claude-billing config' whenever you're ready."
 fi

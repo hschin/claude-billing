@@ -221,11 +221,13 @@ claude_billing() {
     bedrock)
       [[ ! -f "$conf" ]] && { echo "claude-billing: no config found. Run: claude-billing config"; return 1; }
       [[ ! -f "$settings" ]] && { echo "claude-billing: ~/.claude/settings.json not found — is Claude Code installed?"; return 1; }
-      local region sonnet opus haiku
+      local region sonnet opus haiku profile_mode aws_profile
       region=$(_cb_conf_get "$conf" CLAUDE_BILLING_REGION)
       sonnet=$(_cb_conf_get "$conf" CLAUDE_BILLING_SONNET)
       opus=$(_cb_conf_get "$conf"   CLAUDE_BILLING_OPUS)
       haiku=$(_cb_conf_get "$conf"  CLAUDE_BILLING_HAIKU)
+      profile_mode=$(_cb_conf_get "$conf" CLAUDE_BILLING_AWS_PROFILE_MODE)
+      aws_profile=$(_cb_conf_get "$conf"  CLAUDE_BILLING_AWS_PROFILE)
       # shellcheck disable=SC2016  # $region/$sonnet/etc. are jq variables, not shell
       _cb_settings_update "$settings" '
         .env |= (
@@ -234,12 +236,16 @@ claude_billing() {
           .AWS_REGION = $region |
           .ANTHROPIC_DEFAULT_SONNET_MODEL = $sonnet |
           .ANTHROPIC_DEFAULT_OPUS_MODEL = $opus |
-          .ANTHROPIC_DEFAULT_HAIKU_MODEL = $haiku
+          .ANTHROPIC_DEFAULT_HAIKU_MODEL = $haiku |
+          if $mode == "explicit" then .AWS_PROFILE = $profile
+          else del(.AWS_PROFILE) end
         )' \
         --arg sonnet "$sonnet" \
         --arg opus "$opus" \
         --arg haiku "$haiku" \
-        --arg region "$region" || return 1
+        --arg region "$region" \
+        --arg mode "$profile_mode" \
+        --arg profile "$aws_profile" || return 1
       _claude_billing_backup_oauth
       echo "Switched to AWS Bedrock (region: $region) — restart Claude Code to apply"
       ;;
@@ -251,6 +257,7 @@ claude_billing() {
         if ($e.CLAUDE_CODE_USE_BEDROCK // "") != "" then
           "Current: AWS Bedrock",
           "  Region:  \($e.AWS_REGION // "not set")",
+          "  Profile: \(if ($e.AWS_PROFILE // "") != "" then $e.AWS_PROFILE else "inherited/default" end)",
           "  Sonnet:  \($e.ANTHROPIC_DEFAULT_SONNET_MODEL // "not set")",
           "  Opus:    \($e.ANTHROPIC_DEFAULT_OPUS_MODEL // "not set")",
           "  Haiku:   \($e.ANTHROPIC_DEFAULT_HAIKU_MODEL // "not set")"
@@ -349,26 +356,50 @@ _claude_billing_configure() {
   echo ""
 
   local conf="$HOME/.claude-billing.conf"
-  local saved_region saved_sonnet saved_opus saved_haiku
+  local saved_region saved_sonnet saved_opus saved_haiku saved_mode saved_aws_profile
   if [[ -f "$conf" ]]; then
     saved_region=$(_cb_conf_get "$conf" CLAUDE_BILLING_REGION)
     saved_sonnet=$(_cb_conf_get "$conf" CLAUDE_BILLING_SONNET)
     saved_opus=$(_cb_conf_get "$conf"   CLAUDE_BILLING_OPUS)
     saved_haiku=$(_cb_conf_get "$conf"  CLAUDE_BILLING_HAIKU)
+    saved_mode=$(_cb_conf_get "$conf"   CLAUDE_BILLING_AWS_PROFILE_MODE)
+    saved_aws_profile=$(_cb_conf_get "$conf" CLAUDE_BILLING_AWS_PROFILE)
   fi
 
-  printf "Configure AWS credentials now? [y/N]: "
-  setup_creds=""
-  _cb_read -r setup_creds
-  if [[ "$setup_creds" =~ ^[Yy]$ ]]; then
-    printf "AWS profile name (leave blank for default): "
-    _cb_read -r cred_profile
-    if [[ -n "$cred_profile" ]]; then
-      aws configure --profile "$cred_profile"
+  echo "How should Claude Code choose the AWS profile for Bedrock?"
+  echo "  1) Inherit from shell / default AWS credential chain"
+  echo "  2) Set a specific AWS_PROFILE in Claude settings"
+  local default_mode_num="1"
+  [[ "$saved_mode" == "explicit" ]] && default_mode_num="2"
+  printf "Choose [%s]: " "$default_mode_num"
+  local mode_choice=""
+  _cb_read -r mode_choice
+  mode_choice="${mode_choice:-$default_mode_num}"
+
+  local profile_mode="inherit" aws_profile="" setup_creds=""
+  if [[ "$mode_choice" == "2" ]]; then
+    profile_mode="explicit"
+    if [[ -n "$saved_aws_profile" ]]; then
+      printf "AWS profile name for Claude Code Bedrock calls [%s]: " "$saved_aws_profile"
     else
-      aws configure
+      printf "AWS profile name for Claude Code Bedrock calls: "
     fi
+    _cb_read -r aws_profile
+    aws_profile="${aws_profile:-$saved_aws_profile}"
     echo ""
+    printf "Configure credentials for this profile now? [y/N]: "
+    _cb_read -r setup_creds
+    if [[ "$setup_creds" =~ ^[Yy]$ ]]; then
+      aws configure --profile "$aws_profile"
+      echo ""
+    fi
+  else
+    printf "Configure default AWS credentials now? [y/N]: "
+    _cb_read -r setup_creds
+    if [[ "$setup_creds" =~ ^[Yy]$ ]]; then
+      aws configure
+      echo ""
+    fi
   fi
 
   local default_region="${saved_region:-us-east-1}"
@@ -411,14 +442,25 @@ CLAUDE_BILLING_REGION="$region"
 CLAUDE_BILLING_SONNET="$sonnet"
 CLAUDE_BILLING_OPUS="$opus"
 CLAUDE_BILLING_HAIKU="$haiku"
+CLAUDE_BILLING_AWS_PROFILE_MODE="$profile_mode"
+CLAUDE_BILLING_AWS_PROFILE="$aws_profile"
 EOF
 
   echo ""
   echo "Config saved to ~/.claude-billing.conf"
   echo "  Region:  $region"
+  if [[ "$profile_mode" == "explicit" ]]; then
+    echo "  Profile: $aws_profile"
+  else
+    echo "  Profile: inherited/default"
+  fi
   echo "  Sonnet:  $sonnet"
   echo "  Opus:    $opus"
   echo "  Haiku:   $haiku"
+  if [[ "$profile_mode" == "explicit" ]] && [[ ! "$setup_creds" =~ ^[Yy]$ ]]; then
+    echo ""
+    echo "Note: run 'aws configure --profile $aws_profile' before switching to Bedrock if you haven't already."
+  fi
 }
 
 alias claude-billing='claude_billing'
