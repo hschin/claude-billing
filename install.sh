@@ -126,6 +126,16 @@ EOF
   echo "Skipped. Run 'claude-billing config' whenever you're ready."
 fi
 
+# Offer login if no claude.ai OAuth token is present
+if [[ -z "$(_cb_cred_retrieve "Claude Code-credentials" 2>/dev/null)" ]]; then
+  echo ""
+  printf "No claude.ai login found. Log in to your subscription now? [y/N]: "
+  _cb_read -r do_login
+  if [[ "$do_login" =~ ^[Yy]$ ]]; then
+    claude auth login --claudeai
+  fi
+fi
+
 echo ""
 echo "Installation complete!"
 echo ""
@@ -139,3 +149,4 @@ echo "  claude-billing bedrock       # AWS Bedrock"
 echo "  claude-billing status        # show current mode"
 echo "  claude-billing config        # reconfigure Bedrock models"
 echo "  claude-billing add-key       # save or update your Anthropic API key"
+echo "  claude-billing login         # log in to claude.ai"
