@@ -122,6 +122,14 @@ _cb_cred_file_delete() {
     && mv "$tmp" "$cred_file" || rm -f "$tmp"
 }
 
+_cb_settings_update() {
+  local settings="$1" filter="$2"
+  shift 2
+  local tmp
+  tmp=$(mktemp "${settings}.XXXXXX")
+  jq "$@" "$filter" "$settings" > "$tmp" && mv "$tmp" "$settings" || { rm -f "$tmp"; return 1; }
+}
+
 # --- OAuth backup / restore ---
 
 _claude_billing_backup_oauth() {
@@ -160,7 +168,6 @@ _claude_billing_login() {
 claude_billing() {
   local settings="$HOME/.claude/settings.json"
   local conf="$HOME/.claude-billing.conf"
-  local tmp
 
   case "$1" in
     api)
@@ -177,30 +184,28 @@ claude_billing() {
         return 1
       fi
       # Pass key via env var — avoids exposing it in the process list via jq --arg
-      tmp=$(mktemp "$HOME/.claude/settings.XXXXXX")
-      ANTHROPIC_API_KEY="$key" jq '
+      ANTHROPIC_API_KEY="$key" _cb_settings_update "$settings" '
         .env |= (
           del(.CLAUDE_CODE_USE_BEDROCK) |
           del(.ANTHROPIC_DEFAULT_SONNET_MODEL) |
           del(.ANTHROPIC_DEFAULT_OPUS_MODEL) |
           del(.ANTHROPIC_DEFAULT_HAIKU_MODEL) |
           .ANTHROPIC_API_KEY = env.ANTHROPIC_API_KEY
-        )' "$settings" > "$tmp" && mv "$tmp" "$settings" || { rm -f "$tmp"; return 1; }
+        )' || return 1
       _claude_billing_backup_oauth
       echo "Switched to API usage billing — restart Claude Code to apply"
       ;;
 
     subscription)
       [[ ! -f "$settings" ]] && { echo "claude-billing: ~/.claude/settings.json not found — is Claude Code installed?"; return 1; }
-      tmp=$(mktemp "$HOME/.claude/settings.XXXXXX")
-      jq '
+      _cb_settings_update "$settings" '
         .env |= (
           del(.CLAUDE_CODE_USE_BEDROCK) |
           del(.ANTHROPIC_API_KEY) |
           del(.ANTHROPIC_DEFAULT_SONNET_MODEL) |
           del(.ANTHROPIC_DEFAULT_OPUS_MODEL) |
           del(.ANTHROPIC_DEFAULT_HAIKU_MODEL)
-        )' "$settings" > "$tmp" && mv "$tmp" "$settings" || { rm -f "$tmp"; return 1; }
+        )' || return 1
       _claude_billing_restore_oauth
       echo "Switched to claude.ai subscription — restart Claude Code to apply"
       ;;
@@ -208,16 +213,12 @@ claude_billing() {
     bedrock)
       [[ ! -f "$conf" ]] && { echo "claude-billing: no config found. Run: claude-billing config"; return 1; }
       [[ ! -f "$settings" ]] && { echo "claude-billing: ~/.claude/settings.json not found — is Claude Code installed?"; return 1; }
-      CLAUDE_BILLING_REGION=$(_cb_conf_get "$conf" CLAUDE_BILLING_REGION)
-      CLAUDE_BILLING_SONNET=$(_cb_conf_get "$conf" CLAUDE_BILLING_SONNET)
-      CLAUDE_BILLING_OPUS=$(_cb_conf_get "$conf"   CLAUDE_BILLING_OPUS)
-      CLAUDE_BILLING_HAIKU=$(_cb_conf_get "$conf"  CLAUDE_BILLING_HAIKU)
-      tmp=$(mktemp "$HOME/.claude/settings.XXXXXX")
-      jq \
-        --arg sonnet "$CLAUDE_BILLING_SONNET" \
-        --arg opus "$CLAUDE_BILLING_OPUS" \
-        --arg haiku "$CLAUDE_BILLING_HAIKU" \
-        --arg region "$CLAUDE_BILLING_REGION" '
+      local region sonnet opus haiku
+      region=$(_cb_conf_get "$conf" CLAUDE_BILLING_REGION)
+      sonnet=$(_cb_conf_get "$conf" CLAUDE_BILLING_SONNET)
+      opus=$(_cb_conf_get "$conf"   CLAUDE_BILLING_OPUS)
+      haiku=$(_cb_conf_get "$conf"  CLAUDE_BILLING_HAIKU)
+      _cb_settings_update "$settings" '
         .env |= (
           del(.ANTHROPIC_API_KEY) |
           .CLAUDE_CODE_USE_BEDROCK = "1" |
@@ -225,29 +226,30 @@ claude_billing() {
           .ANTHROPIC_DEFAULT_SONNET_MODEL = $sonnet |
           .ANTHROPIC_DEFAULT_OPUS_MODEL = $opus |
           .ANTHROPIC_DEFAULT_HAIKU_MODEL = $haiku
-        )' "$settings" > "$tmp" && mv "$tmp" "$settings" || { rm -f "$tmp"; return 1; }
+        )' \
+        --arg sonnet "$sonnet" \
+        --arg opus "$opus" \
+        --arg haiku "$haiku" \
+        --arg region "$region" || return 1
       _claude_billing_backup_oauth
-      echo "Switched to AWS Bedrock (region: $CLAUDE_BILLING_REGION) — restart Claude Code to apply"
+      echo "Switched to AWS Bedrock (region: $region) — restart Claude Code to apply"
       ;;
 
     status)
       [[ ! -f "$settings" ]] && { echo "claude-billing: ~/.claude/settings.json not found — is Claude Code installed?"; return 1; }
-      local env
-      env=$(jq -r '.env' "$settings")
-      local bedrock api_key
-      bedrock=$(echo "$env" | jq -r '.CLAUDE_CODE_USE_BEDROCK // empty')
-      api_key=$(echo "$env" | jq -r '.ANTHROPIC_API_KEY // empty')
-      if [[ -n "$bedrock" ]]; then
-        echo "Current: AWS Bedrock"
-        echo "  Region:  $(echo "$env" | jq -r '.AWS_REGION // "not set"')"
-        echo "  Sonnet:  $(echo "$env" | jq -r '.ANTHROPIC_DEFAULT_SONNET_MODEL // "not set"')"
-        echo "  Opus:    $(echo "$env" | jq -r '.ANTHROPIC_DEFAULT_OPUS_MODEL // "not set"')"
-        echo "  Haiku:   $(echo "$env" | jq -r '.ANTHROPIC_DEFAULT_HAIKU_MODEL // "not set"')"
-      elif [[ -n "$api_key" ]]; then
-        echo "Current: API usage billing"
-      else
-        echo "Current: claude.ai subscription"
-      fi
+      jq -r '
+        .env as $e |
+        if ($e.CLAUDE_CODE_USE_BEDROCK // "") != "" then
+          "Current: AWS Bedrock",
+          "  Region:  \($e.AWS_REGION // "not set")",
+          "  Sonnet:  \($e.ANTHROPIC_DEFAULT_SONNET_MODEL // "not set")",
+          "  Opus:    \($e.ANTHROPIC_DEFAULT_OPUS_MODEL // "not set")",
+          "  Haiku:   \($e.ANTHROPIC_DEFAULT_HAIKU_MODEL // "not set")"
+        elif ($e.ANTHROPIC_API_KEY // "") != "" then
+          "Current: API usage billing"
+        else
+          "Current: claude.ai subscription"
+        end' "$settings"
       ;;
 
     add-key)
@@ -267,29 +269,7 @@ claude_billing() {
       ;;
 
     uninstall)
-      echo "This will remove:"
-      echo "  ~/.claude-billing/       (scripts)"
-      echo "  ~/.claude-billing.conf   (config)"
-      echo "  source line from your shell RC file"
-      echo ""
-      printf "Continue? [y/N]: "
-      _cb_read -r confirm
-      [[ "$confirm" =~ ^[Yy]$ ]] || { echo "Aborted."; return 1; }
-
-      # Remove source line from whichever RC file has it
-      local rc rctmp
-      for rc in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.profile"; do
-        if grep -q "claude-billing" "$rc" 2>/dev/null; then
-          rctmp=$(mktemp "${rc}.XXXXXX")
-          grep -v "claude-billing" "$rc" > "$rctmp" && mv "$rctmp" "$rc" || rm -f "$rctmp"
-          echo "Removed source line from $rc"
-        fi
-      done
-
-      rm -f "$HOME/.claude-billing.conf"
-      rm -rf "$HOME/.claude-billing"
-
-      echo "Uninstalled. Open a new shell to complete removal."
+      _claude_billing_uninstall
       ;;
 
     *)
@@ -305,6 +285,31 @@ claude_billing() {
       echo "  uninstall     Remove claude-billing"
       ;;
   esac
+}
+
+_claude_billing_uninstall() {
+  echo "This will remove:"
+  echo "  ~/.claude-billing/       (scripts)"
+  echo "  ~/.claude-billing.conf   (config)"
+  echo "  source line from your shell RC file"
+  echo ""
+  printf "Continue? [y/N]: "
+  _cb_read -r confirm
+  [[ "$confirm" =~ ^[Yy]$ ]] || { echo "Aborted."; return 1; }
+
+  local rc rctmp
+  for rc in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.profile"; do
+    if grep -q "claude-billing" "$rc" 2>/dev/null; then
+      rctmp=$(mktemp "${rc}.XXXXXX")
+      grep -v "claude-billing" "$rc" > "$rctmp" && mv "$rctmp" "$rc" || rm -f "$rctmp"
+      echo "Removed source line from $rc"
+    fi
+  done
+
+  rm -f "$HOME/.claude-billing.conf"
+  rm -rf "$HOME/.claude-billing"
+
+  echo "Uninstalled. Open a new shell to complete removal."
 }
 
 _claude_billing_pick_model() {
@@ -332,6 +337,15 @@ _claude_billing_configure() {
   echo "=== claude-billing configuration ==="
   echo ""
 
+  local conf="$HOME/.claude-billing.conf"
+  local saved_region saved_sonnet saved_opus saved_haiku
+  if [[ -f "$conf" ]]; then
+    saved_region=$(_cb_conf_get "$conf" CLAUDE_BILLING_REGION)
+    saved_sonnet=$(_cb_conf_get "$conf" CLAUDE_BILLING_SONNET)
+    saved_opus=$(_cb_conf_get "$conf"   CLAUDE_BILLING_OPUS)
+    saved_haiku=$(_cb_conf_get "$conf"  CLAUDE_BILLING_HAIKU)
+  fi
+
   printf "Configure AWS credentials now? [y/N]: "
   _cb_read -r setup_creds
   if [[ "$setup_creds" =~ ^[Yy]$ ]]; then
@@ -345,7 +359,7 @@ _claude_billing_configure() {
     echo ""
   fi
 
-  local default_region="${CLAUDE_BILLING_REGION:-us-east-1}"
+  local default_region="${saved_region:-us-east-1}"
   printf "AWS region for Bedrock [%s]: " "$default_region"
   _cb_read -r region
   region="${region:-$default_region}"
@@ -375,9 +389,9 @@ _claude_billing_configure() {
   fi
 
   local sonnet opus haiku
-  sonnet=$(_claude_billing_pick_model "Sonnet" "${CLAUDE_BILLING_SONNET:-}" "$models")
-  opus=$(_claude_billing_pick_model "Opus" "${CLAUDE_BILLING_OPUS:-}" "$models")
-  haiku=$(_claude_billing_pick_model "Haiku" "${CLAUDE_BILLING_HAIKU:-}" "$models")
+  sonnet=$(_claude_billing_pick_model "Sonnet" "${saved_sonnet:-}" "$models")
+  opus=$(_claude_billing_pick_model "Opus" "${saved_opus:-}" "$models")
+  haiku=$(_claude_billing_pick_model "Haiku" "${saved_haiku:-}" "$models")
 
   cat > "$HOME/.claude-billing.conf" <<EOF
 CLAUDE_BILLING_REGION="$region"
