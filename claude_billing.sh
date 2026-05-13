@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # claude-billing: switch Claude Code between billing modes (subscription, API, Bedrock)
 # Config: ~/.claude-billing.conf
 # Requires: jq, aws CLI (for Bedrock)
@@ -11,7 +12,7 @@ _cb_conf_get() {
   local conf="$1" key="$2" line val
   while IFS= read -r line; do
     if [[ "$line" == "${key}="* ]]; then
-      val="${line#${key}=}"
+      val="${line#"${key}"=}"
       val="${val#\"}"
       val="${val%\"}"
       printf '%s' "$val"
@@ -20,6 +21,7 @@ _cb_conf_get() {
   done < "$conf"
 }
 
+# shellcheck disable=SC2162  # callers always pass -r via $@
 _cb_read() {
   if [ -r /dev/tty ]; then
     read "$@" </dev/tty
@@ -99,6 +101,7 @@ _cb_cred_file_store() {
   touch "$cred_file" && chmod 600 "$cred_file"
   local tmp
   tmp=$(mktemp "${cred_file}.XXXXXX") && chmod 600 "$tmp"
+  # shellcheck disable=SC2015  # || rm is intentional cleanup, not an else branch
   { awk -v svc="$service" 'substr($0,1,length(svc)+1) != svc "="' "$cred_file" 2>/dev/null || true
     printf '%s=%s\n' "$service" "$value"
   } > "$tmp" && mv "$tmp" "$cred_file" || rm -f "$tmp"
@@ -118,6 +121,7 @@ _cb_cred_file_delete() {
   [[ -f "$cred_file" ]] || return 0
   local tmp
   tmp=$(mktemp "${cred_file}.XXXXXX") && chmod 600 "$tmp"
+  # shellcheck disable=SC2015  # || rm is intentional cleanup, not an else branch
   awk -v svc="$service" 'substr($0,1,length(svc)+1) != svc "="' "$cred_file" > "$tmp" \
     && mv "$tmp" "$cred_file" || rm -f "$tmp"
 }
@@ -127,7 +131,11 @@ _cb_settings_update() {
   shift 2
   local tmp
   tmp=$(mktemp "${settings}.XXXXXX")
-  jq "$@" "$filter" "$settings" > "$tmp" && mv "$tmp" "$settings" || { rm -f "$tmp"; return 1; }
+  if jq "$@" "$filter" "$settings" > "$tmp" && mv "$tmp" "$settings"; then
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
 }
 
 # --- OAuth backup / restore ---
@@ -218,6 +226,7 @@ claude_billing() {
       sonnet=$(_cb_conf_get "$conf" CLAUDE_BILLING_SONNET)
       opus=$(_cb_conf_get "$conf"   CLAUDE_BILLING_OPUS)
       haiku=$(_cb_conf_get "$conf"  CLAUDE_BILLING_HAIKU)
+      # shellcheck disable=SC2016  # $region/$sonnet/etc. are jq variables, not shell
       _cb_settings_update "$settings" '
         .env |= (
           del(.ANTHROPIC_API_KEY) |
@@ -294,6 +303,7 @@ _claude_billing_uninstall() {
   echo "  source line from your shell RC file"
   echo ""
   printf "Continue? [y/N]: "
+  confirm=""
   _cb_read -r confirm
   [[ "$confirm" =~ ^[Yy]$ ]] || { echo "Aborted."; return 1; }
 
@@ -301,6 +311,7 @@ _claude_billing_uninstall() {
   for rc in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.profile"; do
     if grep -q "claude-billing" "$rc" 2>/dev/null; then
       rctmp=$(mktemp "${rc}.XXXXXX")
+      # shellcheck disable=SC2015  # || rm is intentional cleanup, not an else branch
       grep -v "claude-billing" "$rc" > "$rctmp" && mv "$rctmp" "$rc" || rm -f "$rctmp"
       echo "Removed source line from $rc"
     fi
@@ -347,6 +358,7 @@ _claude_billing_configure() {
   fi
 
   printf "Configure AWS credentials now? [y/N]: "
+  setup_creds=""
   _cb_read -r setup_creds
   if [[ "$setup_creds" =~ ^[Yy]$ ]]; then
     printf "AWS profile name (leave blank for default): "
@@ -367,6 +379,7 @@ _claude_billing_configure() {
   echo ""
   echo "Fetching available Claude models in $region..."
   local models
+  # shellcheck disable=SC2016  # backticks in --query are JMESPath syntax, not shell
   models=$(aws bedrock list-foundation-models \
     --region "$region" \
     --by-provider Anthropic \

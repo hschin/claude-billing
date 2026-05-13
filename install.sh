@@ -100,9 +100,11 @@ source "$FUNC_FILE"
 # Platform-specific API key setup
 echo ""
 printf "Do you want to save your Anthropic API key now? [y/N]: "
+save_key=""
 _cb_read -r save_key
 if [[ "$save_key" =~ ^[Yy]$ ]]; then
   printf "Enter your Anthropic API key: "
+  key=""
   _cb_read -rs key
   echo ""
   _cb_cred_store "anthropic-api-key" "$key"
@@ -112,6 +114,7 @@ fi
 # Bedrock setup
 echo ""
 printf "Set up Bedrock models now? [y/N]: "
+setup_bedrock=""
 _cb_read -r setup_bedrock
 
 if [[ "$setup_bedrock" =~ ^[Yy]$ ]]; then
@@ -130,6 +133,7 @@ fi
 if command -v claude &>/dev/null && [[ -z "$(_cb_cred_retrieve "Claude Code-credentials" 2>/dev/null)" ]]; then
   echo ""
   printf "No claude.ai login found. Log in to your subscription now? [y/N]: "
+  do_login=""
   _cb_read -r do_login
   if [[ "$do_login" =~ ^[Yy]$ ]]; then
     claude auth login --claudeai
