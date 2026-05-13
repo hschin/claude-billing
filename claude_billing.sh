@@ -228,8 +228,32 @@ claude_billing() {
       claude auth login --claudeai
       ;;
 
+    uninstall)
+      echo "This will remove:"
+      echo "  ~/.claude-billing/       (scripts)"
+      echo "  ~/.claude-billing.conf   (config)"
+      echo "  source line from your shell RC file"
+      echo ""
+      printf "Continue? [y/N]: "
+      _cb_read -r confirm
+      [[ "$confirm" =~ ^[Yy]$ ]] || { echo "Aborted."; return 1; }
+
+      # Remove source line from whichever RC file has it
+      for rc in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.profile"; do
+        if grep -q "claude-billing" "$rc" 2>/dev/null; then
+          grep -v "claude-billing" "$rc" > "$rc.tmp" && mv "$rc.tmp" "$rc"
+          echo "Removed source line from $rc"
+        fi
+      done
+
+      rm -f "$HOME/.claude-billing.conf"
+      rm -rf "$HOME/.claude-billing"
+
+      echo "Uninstalled. Open a new shell to complete removal."
+      ;;
+
     *)
-      echo "Usage: claude-billing [subscription|api|bedrock|status|config|add-key|login]"
+      echo "Usage: claude-billing [subscription|api|bedrock|status|config|add-key|login|uninstall]"
       echo ""
       echo "  subscription  Use claude.ai subscription (Pro, Max, Teams, Enterprise)"
       echo "  api           Use Anthropic API key billing"
@@ -238,6 +262,7 @@ claude_billing() {
       echo "  config        Reconfigure Bedrock region and model IDs"
       echo "  add-key       Save your Anthropic API key to the credential store"
       echo "  login         Log in to claude.ai"
+      echo "  uninstall     Remove claude-billing"
       ;;
   esac
 }

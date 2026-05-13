@@ -40,6 +40,7 @@ claude-billing status        # show current mode
 claude-billing config        # reconfigure Bedrock region and model IDs
 claude-billing add-key       # save or update your Anthropic API key
 claude-billing login         # log in to claude.ai
+claude-billing uninstall     # remove claude-billing
 ```
 
 Restart Claude Code after switching for changes to take effect.
