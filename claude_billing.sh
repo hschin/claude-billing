@@ -116,7 +116,7 @@ _claude_billing_restore_oauth() {
 
 # --- Main function ---
 
-claude-billing() {
+claude_billing() {
   local settings="$HOME/.claude/settings.json"
   local conf="$HOME/.claude-billing.conf"
 
@@ -299,3 +299,5 @@ EOF
   echo "  Opus:    $opus"
   echo "  Haiku:   $haiku"
 }
+
+alias claude-billing='claude_billing'
