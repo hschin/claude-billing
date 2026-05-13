@@ -7,6 +7,19 @@
 
 # --- Helpers ---
 
+_cb_conf_get() {
+  local conf="$1" key="$2" line val
+  while IFS= read -r line; do
+    if [[ "$line" == "${key}="* ]]; then
+      val="${line#${key}=}"
+      val="${val#\"}"
+      val="${val%\"}"
+      printf '%s' "$val"
+      return
+    fi
+  done < "$conf"
+}
+
 _cb_read() {
   if [ -r /dev/tty ]; then
     read "$@" </dev/tty
@@ -35,6 +48,8 @@ _cb_cred_store() {
   local service="$1" value="$2"
   case "$(_cb_platform)" in
     macos)
+      # Note: -w passes the value as a CLI arg (visible in ps briefly);
+      # the macOS security CLI has no stdin option for add-generic-password.
       security add-generic-password -s "$service" -a "$USER" -w "$value" 2>/dev/null || \
         security add-generic-password -U -s "$service" -a "$USER" -w "$value" 2>/dev/null
       ;;
@@ -82,24 +97,29 @@ _cb_cred_file_store() {
   local service="$1" value="$2"
   local cred_file="$HOME/.claude-billing-credentials"
   touch "$cred_file" && chmod 600 "$cred_file"
-  local existing
-  existing=$(grep -v "^${service}=" "$cred_file" 2>/dev/null || true)
-  { [[ -n "$existing" ]] && printf '%s\n' "$existing"; printf '%s=%s\n' "$service" "$value"; } > "$cred_file"
+  local tmp
+  tmp=$(mktemp "${cred_file}.XXXXXX") && chmod 600 "$tmp"
+  { awk -v svc="$service" 'substr($0,1,length(svc)+1) != svc "="' "$cred_file" 2>/dev/null || true
+    printf '%s=%s\n' "$service" "$value"
+  } > "$tmp" && mv "$tmp" "$cred_file" || rm -f "$tmp"
 }
 
 _cb_cred_file_retrieve() {
   local service="$1"
   local cred_file="$HOME/.claude-billing-credentials"
-  grep "^${service}=" "$cred_file" 2>/dev/null | cut -d= -f2-
+  awk -v svc="$service" \
+    'substr($0,1,length(svc)+1) == svc "=" { print substr($0,length(svc)+2) }' \
+    "$cred_file" 2>/dev/null
 }
 
 _cb_cred_file_delete() {
   local service="$1"
   local cred_file="$HOME/.claude-billing-credentials"
-  [[ -f "$cred_file" ]] || return
-  local existing
-  existing=$(grep -v "^${service}=" "$cred_file")
-  printf '%s\n' "$existing" > "$cred_file"
+  [[ -f "$cred_file" ]] || return 0
+  local tmp
+  tmp=$(mktemp "${cred_file}.XXXXXX") && chmod 600 "$tmp"
+  awk -v svc="$service" 'substr($0,1,length(svc)+1) != svc "="' "$cred_file" > "$tmp" \
+    && mv "$tmp" "$cred_file" || rm -f "$tmp"
 }
 
 # --- OAuth backup / restore ---
@@ -140,6 +160,7 @@ _claude_billing_login() {
 claude_billing() {
   local settings="$HOME/.claude/settings.json"
   local conf="$HOME/.claude-billing.conf"
+  local tmp
 
   if [[ ! -f "$conf" ]]; then
     echo "claude-billing: no config found. Run: claude-billing config"
@@ -151,8 +172,10 @@ claude_billing() {
     return 1
   fi
 
-  # shellcheck source=/dev/null
-  source "$conf"
+  CLAUDE_BILLING_REGION=$(_cb_conf_get "$conf" CLAUDE_BILLING_REGION)
+  CLAUDE_BILLING_SONNET=$(_cb_conf_get "$conf" CLAUDE_BILLING_SONNET)
+  CLAUDE_BILLING_OPUS=$(_cb_conf_get "$conf"   CLAUDE_BILLING_OPUS)
+  CLAUDE_BILLING_HAIKU=$(_cb_conf_get "$conf"  CLAUDE_BILLING_HAIKU)
 
   case "$1" in
     api)
@@ -167,19 +190,22 @@ claude_billing() {
         esac
         return 1
       fi
-      jq --arg key "$key" '
+      # Pass key via env var — avoids exposing it in the process list via jq --arg
+      tmp=$(mktemp "$HOME/.claude/settings.XXXXXX")
+      ANTHROPIC_API_KEY="$key" jq '
         .env |= (
           del(.CLAUDE_CODE_USE_BEDROCK) |
           del(.ANTHROPIC_DEFAULT_SONNET_MODEL) |
           del(.ANTHROPIC_DEFAULT_OPUS_MODEL) |
           del(.ANTHROPIC_DEFAULT_HAIKU_MODEL) |
-          .ANTHROPIC_API_KEY = $key
-        )' "$settings" > "$settings.tmp" && mv "$settings.tmp" "$settings" || { rm -f "$settings.tmp"; return 1; }
+          .ANTHROPIC_API_KEY = env.ANTHROPIC_API_KEY
+        )' "$settings" > "$tmp" && mv "$tmp" "$settings" || { rm -f "$tmp"; return 1; }
       _claude_billing_backup_oauth
       echo "Switched to API usage billing — restart Claude Code to apply"
       ;;
 
     subscription)
+      tmp=$(mktemp "$HOME/.claude/settings.XXXXXX")
       jq '
         .env |= (
           del(.CLAUDE_CODE_USE_BEDROCK) |
@@ -187,12 +213,13 @@ claude_billing() {
           del(.ANTHROPIC_DEFAULT_SONNET_MODEL) |
           del(.ANTHROPIC_DEFAULT_OPUS_MODEL) |
           del(.ANTHROPIC_DEFAULT_HAIKU_MODEL)
-        )' "$settings" > "$settings.tmp" && mv "$settings.tmp" "$settings" || { rm -f "$settings.tmp"; return 1; }
+        )' "$settings" > "$tmp" && mv "$tmp" "$settings" || { rm -f "$tmp"; return 1; }
       _claude_billing_restore_oauth
       echo "Switched to claude.ai subscription — restart Claude Code to apply"
       ;;
 
     bedrock)
+      tmp=$(mktemp "$HOME/.claude/settings.XXXXXX")
       jq \
         --arg sonnet "$CLAUDE_BILLING_SONNET" \
         --arg opus "$CLAUDE_BILLING_OPUS" \
@@ -205,7 +232,7 @@ claude_billing() {
           .ANTHROPIC_DEFAULT_SONNET_MODEL = $sonnet |
           .ANTHROPIC_DEFAULT_OPUS_MODEL = $opus |
           .ANTHROPIC_DEFAULT_HAIKU_MODEL = $haiku
-        )' "$settings" > "$settings.tmp" && mv "$settings.tmp" "$settings" || { rm -f "$settings.tmp"; return 1; }
+        )' "$settings" > "$tmp" && mv "$tmp" "$settings" || { rm -f "$tmp"; return 1; }
       _claude_billing_backup_oauth
       echo "Switched to AWS Bedrock (region: $CLAUDE_BILLING_REGION) — restart Claude Code to apply"
       ;;
@@ -256,9 +283,11 @@ claude_billing() {
       [[ "$confirm" =~ ^[Yy]$ ]] || { echo "Aborted."; return 1; }
 
       # Remove source line from whichever RC file has it
+      local rc rctmp
       for rc in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.profile"; do
         if grep -q "claude-billing" "$rc" 2>/dev/null; then
-          grep -v "claude-billing" "$rc" > "$rc.tmp" && mv "$rc.tmp" "$rc"
+          rctmp=$(mktemp "${rc}.XXXXXX")
+          grep -v "claude-billing" "$rc" > "$rctmp" && mv "$rctmp" "$rc" || rm -f "$rctmp"
           echo "Removed source line from $rc"
         fi
       done
