@@ -275,9 +275,9 @@ _claude_billing_configure() {
     local model_list="$3"
 
     if [[ -n "$model_list" ]]; then
-      printf "Select %s model number (or type an ID) [%s]: " "$label" "$default"
+      printf "Select %s model number (or type an ID) [%s]: " "$label" "$default" >&2
     else
-      printf "%s model ID [%s]: " "$label" "$default"
+      printf "%s model ID [%s]: " "$label" "$default" >&2
     fi
     _cb_read -r input
 
