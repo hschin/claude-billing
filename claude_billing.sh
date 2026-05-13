@@ -246,6 +246,19 @@ _claude_billing_configure() {
   echo "=== claude-billing configuration ==="
   echo ""
 
+  printf "Configure AWS credentials now? [y/N]: "
+  _cb_read -r setup_creds
+  if [[ "$setup_creds" =~ ^[Yy]$ ]]; then
+    printf "AWS profile name (leave blank for default): "
+    _cb_read -r cred_profile
+    if [[ -n "$cred_profile" ]]; then
+      aws configure --profile "$cred_profile"
+    else
+      aws configure
+    fi
+    echo ""
+  fi
+
   local default_region="${CLAUDE_BILLING_REGION:-us-east-1}"
   printf "AWS region for Bedrock [%s]: " "$default_region"
   _cb_read -r region

@@ -77,28 +77,7 @@ Model IDs vary by region and change as new versions are released — the interac
 
 ## AWS profile
 
-This tool does not manage your AWS profile. Set it before launching Claude Code using one of these approaches:
-
-**Shell (global, `~/.zshrc` or `~/.bashrc`):**
-```sh
-export AWS_PROFILE=my-bedrock-profile
-```
-
-**Per-project with [direnv](https://direnv.net/) (`.envrc` in your project root):**
-```sh
-export AWS_PROFILE=my-bedrock-profile
-```
-
-**Via Claude Code settings (`~/.claude/settings.json`):**
-```json
-{
-  "env": {
-    "AWS_PROFILE": "my-bedrock-profile"
-  }
-}
-```
-
-The Claude Code settings approach is the most portable — it applies whenever Claude Code runs regardless of how the shell was started.
+AWS profile is not managed by this tool — set it via direnv, your shell, or `~/.claude/settings.json` before launching Claude Code. During `claude-billing config` you can run `aws configure [--profile name]` to set up credentials for a profile, but which profile is active is left to your environment.
 
 ## Notes
 
