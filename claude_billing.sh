@@ -1,6 +1,6 @@
 # shellcheck shell=bash
 # claude-billing: switch Claude Code between billing modes (subscription, API, Bedrock)
-_CB_VERSION="0.1.0"
+_CB_VERSION="1.0.0"
 # Config: ~/.claude-billing.conf
 # Requires: jq, aws CLI (for Bedrock)
 # macOS: uses Keychain (security CLI)
