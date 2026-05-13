@@ -121,7 +121,7 @@ _claude_billing_restore_oauth() {
     echo "Restored claude.ai OAuth token"
   else
     echo "No OAuth backup found — launching login..."
-    claude /login
+    claude auth login --claudeai
   fi
 }
 
@@ -225,7 +225,7 @@ claude_billing() {
       ;;
 
     login)
-      claude /login
+      claude auth login --claudeai
       ;;
 
     *)
