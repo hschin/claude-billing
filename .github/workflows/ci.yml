@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo apt-get install -y shellcheck zsh
+
+      - name: Bash syntax check
+        run: bash -n claude_billing.sh install.sh
+
+      - name: Zsh syntax check
+        run: zsh -n claude_billing.sh
+
+      - name: ShellCheck
+        run: shellcheck claude_billing.sh install.sh

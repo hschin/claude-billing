@@ -1,5 +1,6 @@
 # shellcheck shell=bash
 # claude-billing: switch Claude Code between billing modes (subscription, API, Bedrock)
+_CB_VERSION="0.1.0"
 # Config: ~/.claude-billing.conf
 # Requires: jq, aws CLI (for Bedrock)
 # macOS: uses Keychain (security CLI)
@@ -308,20 +309,25 @@ claude_billing() {
       _claude_billing_login
       ;;
 
+    version)
+      echo "claude-billing $_CB_VERSION"
+      ;;
+
     uninstall)
       _claude_billing_uninstall
       ;;
 
     *)
-      echo "Usage: claude-billing [subscription|api|bedrock|status|config|add-key|login|uninstall]"
+      echo "Usage: claude-billing [subscription|api|bedrock|status|config|add-key|login|version|uninstall]"
       echo ""
       echo "  subscription  Use claude.ai subscription (Pro, Max, Teams, Enterprise)"
       echo "  api           Use Anthropic API key billing"
       echo "  bedrock       Use AWS Bedrock"
       echo "  status        Show current billing mode"
-      echo "  config        Reconfigure Bedrock region and model IDs"
-      echo "  add-key       Save your Anthropic API key to the credential store"
+      echo "  config        Reconfigure Bedrock region, models, and AWS profile"
+      echo "  add-key       Save or update your Anthropic API key"
       echo "  login         Log in to claude.ai"
+      echo "  version       Show version"
       echo "  uninstall     Remove claude-billing"
       ;;
   esac

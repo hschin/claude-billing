@@ -150,6 +150,44 @@ claude-billing uninstall
 
 Removes `~/.claude-billing/`, `~/.claude-billing.conf`, and the source line from your shell RC file. Open a new shell to complete removal.
 
+## Support boundaries
+
+**Supported shells:** bash and zsh (the script is sourced, not executed, so it must be compatible with whichever shell you use).
+
+**Supported platforms:** macOS, Linux, Windows via Git Bash or WSL.
+
+**Files this tool reads and writes:**
+
+| File | Purpose |
+|------|---------|
+| `~/.claude/settings.json` | Edited on every mode switch to set/remove env vars |
+| `~/.claude/settings.json.bak` | Overwritten before each switch as a recovery backup |
+| `~/.claude-billing.conf` | Stores your Bedrock region, model IDs, and AWS profile config |
+| `~/.claude-billing/claude_billing.sh` | The installed script |
+| Your shell RC file (`.zshrc`, `.bashrc`, or `.profile`) | Source block added on install, removed on uninstall |
+
+**Secrets stored (never written to disk unencrypted except on Windows):**
+
+| Secret | Keychain service name |
+|--------|-----------------------|
+| Anthropic API key | `anthropic-api-key` |
+| claude.ai OAuth token (live) | `Claude Code-credentials` |
+| claude.ai OAuth token (backup) | `Claude Code-credentials-backup` |
+
+On Windows (Git Bash), secrets are stored in `~/.claude-billing-credentials` with permissions `600`.
+
+**Recovering from a bad switch:**
+
+If a switch leaves Claude Code in a broken state, restore the previous settings:
+```sh
+cp ~/.claude/settings.json.bak ~/.claude/settings.json
+```
+
+If your claude.ai OAuth token is missing after switching away from subscription:
+```sh
+claude-billing subscription   # triggers login if no backup is found
+```
+
 ## Notes
 
 - Windows support requires Git Bash or WSL
