@@ -162,23 +162,9 @@ claude_billing() {
   local conf="$HOME/.claude-billing.conf"
   local tmp
 
-  if [[ ! -f "$conf" ]]; then
-    echo "claude-billing: no config found. Run: claude-billing config"
-    return 1
-  fi
-
-  if [[ ! -f "$settings" ]]; then
-    echo "claude-billing: ~/.claude/settings.json not found — is Claude Code installed?"
-    return 1
-  fi
-
-  CLAUDE_BILLING_REGION=$(_cb_conf_get "$conf" CLAUDE_BILLING_REGION)
-  CLAUDE_BILLING_SONNET=$(_cb_conf_get "$conf" CLAUDE_BILLING_SONNET)
-  CLAUDE_BILLING_OPUS=$(_cb_conf_get "$conf"   CLAUDE_BILLING_OPUS)
-  CLAUDE_BILLING_HAIKU=$(_cb_conf_get "$conf"  CLAUDE_BILLING_HAIKU)
-
   case "$1" in
     api)
+      [[ ! -f "$settings" ]] && { echo "claude-billing: ~/.claude/settings.json not found — is Claude Code installed?"; return 1; }
       local key
       key=$(_cb_cred_retrieve "anthropic-api-key")
       if [[ -z "$key" ]]; then
@@ -205,6 +191,7 @@ claude_billing() {
       ;;
 
     subscription)
+      [[ ! -f "$settings" ]] && { echo "claude-billing: ~/.claude/settings.json not found — is Claude Code installed?"; return 1; }
       tmp=$(mktemp "$HOME/.claude/settings.XXXXXX")
       jq '
         .env |= (
@@ -219,6 +206,12 @@ claude_billing() {
       ;;
 
     bedrock)
+      [[ ! -f "$conf" ]] && { echo "claude-billing: no config found. Run: claude-billing config"; return 1; }
+      [[ ! -f "$settings" ]] && { echo "claude-billing: ~/.claude/settings.json not found — is Claude Code installed?"; return 1; }
+      CLAUDE_BILLING_REGION=$(_cb_conf_get "$conf" CLAUDE_BILLING_REGION)
+      CLAUDE_BILLING_SONNET=$(_cb_conf_get "$conf" CLAUDE_BILLING_SONNET)
+      CLAUDE_BILLING_OPUS=$(_cb_conf_get "$conf"   CLAUDE_BILLING_OPUS)
+      CLAUDE_BILLING_HAIKU=$(_cb_conf_get "$conf"  CLAUDE_BILLING_HAIKU)
       tmp=$(mktemp "$HOME/.claude/settings.XXXXXX")
       jq \
         --arg sonnet "$CLAUDE_BILLING_SONNET" \
@@ -238,6 +231,7 @@ claude_billing() {
       ;;
 
     status)
+      [[ ! -f "$settings" ]] && { echo "claude-billing: ~/.claude/settings.json not found — is Claude Code installed?"; return 1; }
       local env
       env=$(jq -r '.env' "$settings")
       local bedrock api_key
