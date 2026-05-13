@@ -44,6 +44,11 @@ _cb_platform() {
   echo "$_CB_PLATFORM"
 }
 
+_cb_require_cmd() {
+  local cmd="$1" msg="$2"
+  command -v "$cmd" &>/dev/null || { echo "claude-billing: '$cmd' not found in PATH — $msg" >&2; return 1; }
+}
+
 # --- Credential storage abstraction ---
 
 _cb_cred_store() {
@@ -98,13 +103,16 @@ _cb_cred_delete() {
 _cb_cred_file_store() {
   local service="$1" value="$2"
   local cred_file="$HOME/.claude-billing-credentials"
-  touch "$cred_file" && chmod 600 "$cred_file"
+  touch "$cred_file" && chmod 600 "$cred_file" || return 1
   local tmp
-  tmp=$(mktemp "${cred_file}.XXXXXX") && chmod 600 "$tmp"
-  # shellcheck disable=SC2015  # || rm is intentional cleanup, not an else branch
-  { awk -v svc="$service" 'substr($0,1,length(svc)+1) != svc "="' "$cred_file" 2>/dev/null || true
-    printf '%s=%s\n' "$service" "$value"
-  } > "$tmp" && mv "$tmp" "$cred_file" || rm -f "$tmp"
+  tmp=$(mktemp "${cred_file}.XXXXXX") && chmod 600 "$tmp" || return 1
+  if { awk -v svc="$service" 'substr($0,1,length(svc)+1) != svc "="' "$cred_file" 2>/dev/null || true
+       printf '%s=%s\n' "$service" "$value"
+     } > "$tmp" && mv "$tmp" "$cred_file"; then
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
 }
 
 _cb_cred_file_retrieve() {
@@ -129,6 +137,7 @@ _cb_cred_file_delete() {
 _cb_settings_update() {
   local settings="$1" filter="$2"
   shift 2
+  _cb_require_cmd jq "install with: brew install jq / apt install jq / winget install jqlang.jq" || return 1
   local tmp
   tmp=$(mktemp "${settings}.XXXXXX")
   if jq "$@" "$filter" "$settings" > "$tmp" && mv "$tmp" "$settings"; then
@@ -144,9 +153,13 @@ _claude_billing_backup_oauth() {
   local oauth
   oauth=$(_cb_cred_retrieve "Claude Code-credentials")
   if [[ -n "$oauth" ]]; then
-    # Only overwrite backup if we have a live token — prevents clobbering a valid backup
-    _cb_cred_store "Claude Code-credentials-backup" "$oauth"
-    _cb_cred_delete "Claude Code-credentials"
+    # Only delete the live token after confirming the backup was written
+    if _cb_cred_store "Claude Code-credentials-backup" "$oauth"; then
+      _cb_cred_delete "Claude Code-credentials"
+    else
+      echo "claude-billing: failed to write OAuth backup — not removing live token" >&2
+      return 1
+    fi
   fi
 }
 
@@ -154,9 +167,14 @@ _claude_billing_restore_oauth() {
   local backup
   backup=$(_cb_cred_retrieve "Claude Code-credentials-backup")
   if [[ -n "$backup" ]]; then
-    _cb_cred_store "Claude Code-credentials" "$backup"
-    _cb_cred_delete "Claude Code-credentials-backup"
-    echo "Restored claude.ai OAuth token"
+    # Only delete the backup after confirming the live token was restored
+    if _cb_cred_store "Claude Code-credentials" "$backup"; then
+      _cb_cred_delete "Claude Code-credentials-backup"
+      echo "Restored claude.ai OAuth token"
+    else
+      echo "claude-billing: failed to restore OAuth token — backup preserved" >&2
+      return 1
+    fi
   else
     echo "No OAuth backup found — launching login..."
     _claude_billing_login
@@ -228,6 +246,10 @@ claude_billing() {
       haiku=$(_cb_conf_get "$conf"  CLAUDE_BILLING_HAIKU)
       profile_mode=$(_cb_conf_get "$conf" CLAUDE_BILLING_AWS_PROFILE_MODE)
       aws_profile=$(_cb_conf_get "$conf"  CLAUDE_BILLING_AWS_PROFILE)
+      if [[ -z "$region" || -z "$sonnet" || -z "$opus" || -z "$haiku" ]]; then
+        echo "claude-billing: Bedrock config is incomplete — run: claude-billing config"
+        return 1
+      fi
       # shellcheck disable=SC2016  # $region/$sonnet/etc. are jq variables, not shell
       _cb_settings_update "$settings" '
         .env |= (
@@ -252,6 +274,7 @@ claude_billing() {
 
     status)
       [[ ! -f "$settings" ]] && { echo "claude-billing: ~/.claude/settings.json not found — is Claude Code installed?"; return 1; }
+      _cb_require_cmd jq "install with: brew install jq / apt install jq / winget install jqlang.jq" || return 1
       jq -r '
         .env as $e |
         if ($e.CLAUDE_CODE_USE_BEDROCK // "") != "" then
@@ -390,6 +413,7 @@ _claude_billing_configure() {
     printf "Configure credentials for this profile now? [y/N]: "
     _cb_read -r setup_creds
     if [[ "$setup_creds" =~ ^[Yy]$ ]]; then
+      _cb_require_cmd aws "see https://aws.amazon.com/cli/" || return 1
       aws configure --profile "$aws_profile"
       echo ""
     fi
@@ -397,6 +421,7 @@ _claude_billing_configure() {
     printf "Configure default AWS credentials now? [y/N]: "
     _cb_read -r setup_creds
     if [[ "$setup_creds" =~ ^[Yy]$ ]]; then
+      _cb_require_cmd aws "see https://aws.amazon.com/cli/" || return 1
       aws configure
       echo ""
     fi
