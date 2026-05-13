@@ -202,8 +202,8 @@ claude_billing() {
       ;;
 
     add-key)
-      echo -n "Enter your Anthropic API key: "
-      read -rs key
+      printf "Enter your Anthropic API key: "
+      read -rs key </dev/tty
       echo ""
       _cb_cred_store "anthropic-api-key" "$key"
       echo "API key saved"
@@ -231,8 +231,8 @@ _claude_billing_configure() {
   echo ""
 
   local default_region="${CLAUDE_BILLING_REGION:-us-east-1}"
-  echo -n "AWS region for Bedrock [$default_region]: "
-  read -r region
+  printf "AWS region for Bedrock [%s]: " "$default_region"
+  read -r region </dev/tty
   region="${region:-$default_region}"
 
   echo ""
@@ -265,11 +265,11 @@ _claude_billing_configure() {
     local model_list="$3"
 
     if [[ -n "$model_list" ]]; then
-      echo -n "Select $label model number (or type an ID) [$default]: "
+      printf "Select %s model number (or type an ID) [%s]: " "$label" "$default"
     else
-      echo -n "$label model ID [$default]: "
+      printf "%s model ID [%s]: " "$label" "$default"
     fi
-    read -r input
+    read -r input </dev/tty
 
     if [[ -z "$input" ]]; then
       echo "$default"
