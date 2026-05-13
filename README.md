@@ -61,7 +61,44 @@ Restart Claude Code after switching for changes to take effect.
 
 Model IDs are saved to `~/.claude-billing.conf` during install (or `claude-billing config`). Re-run `claude-billing config` whenever new Claude models are released to pick up updated IDs.
 
+A typical `~/.claude-billing.conf` looks like:
+
+```sh
+CLAUDE_BILLING_REGION="us-east-1"
+CLAUDE_BILLING_SONNET="global.anthropic.claude-sonnet-4-6"
+CLAUDE_BILLING_OPUS="global.anthropic.claude-opus-4-7"
+CLAUDE_BILLING_HAIKU="global.anthropic.claude-haiku-4-5-20251001-v1:0"
+```
+
+The `global.` prefix uses [Bedrock's global inference profiles](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-support.html), which route requests across regions for higher availability — recommended over pinning to a specific region.
+
+Model IDs vary by region and change as new versions are released — the interactive `claude-billing config` fetches the current list from your account automatically.
+
+## AWS profile
+
+This tool does not manage your AWS profile. Set it before launching Claude Code using one of these approaches:
+
+**Shell (global, `~/.zshrc` or `~/.bashrc`):**
+```sh
+export AWS_PROFILE=my-bedrock-profile
+```
+
+**Per-project with [direnv](https://direnv.net/) (`.envrc` in your project root):**
+```sh
+export AWS_PROFILE=my-bedrock-profile
+```
+
+**Via Claude Code settings (`~/.claude/settings.json`):**
+```json
+{
+  "env": {
+    "AWS_PROFILE": "my-bedrock-profile"
+  }
+}
+```
+
+The Claude Code settings approach is the most portable — it applies whenever Claude Code runs regardless of how the shell was started.
+
 ## Notes
 
-- AWS profile is **not** managed by this tool — set it via your shell, direnv, or AWS config before launching Claude Code
 - Windows support requires Git Bash or WSL
