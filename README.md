@@ -21,7 +21,7 @@ AWS CLI is only required for Bedrock.
 ## Install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/hschin/claude-billing/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/hschin/claude-billing/main/install.sh | bash
 ```
 
 Then reload your shell:

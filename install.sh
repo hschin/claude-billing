@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -e
 
+if [ -z "${BASH_VERSION:-}" ]; then
+  echo "Error: this script requires bash. Run with:"
+  echo "  curl -fsSL https://raw.githubusercontent.com/hschin/claude-billing/main/install.sh | bash"
+  exit 1
+fi
+
 REPO_URL="https://raw.githubusercontent.com/hschin/claude-billing/main"
 INSTALL_DIR="$HOME/.claude-billing"
 FUNC_FILE="$INSTALL_DIR/claude_billing.sh"
