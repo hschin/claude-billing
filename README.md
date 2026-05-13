@@ -1,5 +1,10 @@
 # claude-billing — Instant billing mode switching for Claude Code
 
+[![CI](https://github.com/hschin/claude-billing/actions/workflows/ci.yml/badge.svg)](https://github.com/hschin/claude-billing/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)](https://github.com/hschin/claude-billing#requirements)
+[![Shell](https://img.shields.io/badge/shell-bash%20%7C%20zsh-89E051?logo=gnubash)](https://github.com/hschin/claude-billing#notes)
+
 A shell utility for switching [Claude Code](https://claude.ai/code) between billing modes without manually editing config files. Install once, switch instantly.
 
 | Mode | Description |
