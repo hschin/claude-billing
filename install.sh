@@ -127,7 +127,7 @@ EOF
 fi
 
 # Offer login if no claude.ai OAuth token is present
-if [[ -z "$(_cb_cred_retrieve "Claude Code-credentials" 2>/dev/null)" ]]; then
+if command -v claude &>/dev/null && [[ -z "$(_cb_cred_retrieve "Claude Code-credentials" 2>/dev/null)" ]]; then
   echo ""
   printf "No claude.ai login found. Log in to your subscription now? [y/N]: "
   _cb_read -r do_login

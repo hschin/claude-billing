@@ -15,15 +15,18 @@ _cb_read() {
   fi
 }
 
-# --- Platform detection ---
-
+# Cache platform detection — avoids a subshell + uname on every credential op
+_CB_PLATFORM=""
 _cb_platform() {
-  case "$(uname -s)" in
-    Darwin)             echo "macos" ;;
-    Linux)              echo "linux" ;;
-    MINGW*|MSYS*|CYGWIN*) echo "windows" ;;
-    *)                  echo "unknown" ;;
-  esac
+  if [[ -z "$_CB_PLATFORM" ]]; then
+    case "$(uname -s)" in
+      Darwin)               _CB_PLATFORM="macos" ;;
+      Linux)                _CB_PLATFORM="linux" ;;
+      MINGW*|MSYS*|CYGWIN*) _CB_PLATFORM="windows" ;;
+      *)                    _CB_PLATFORM="unknown" ;;
+    esac
+  fi
+  echo "$_CB_PLATFORM"
 }
 
 # --- Credential storage abstraction ---
@@ -36,7 +39,7 @@ _cb_cred_store() {
         security add-generic-password -U -s "$service" -a "$USER" -w "$value" 2>/dev/null
       ;;
     linux)
-      echo -n "$value" | secret-tool store --label="$service" service "$service" account "$USER" 2>/dev/null
+      printf '%s' "$value" | secret-tool store --label="$service" service "$service" account "$USER" 2>/dev/null
       ;;
     windows)
       _cb_cred_file_store "$service" "$value"
@@ -80,9 +83,8 @@ _cb_cred_file_store() {
   local cred_file="$HOME/.claude-billing-credentials"
   touch "$cred_file" && chmod 600 "$cred_file"
   local existing
-  existing=$(grep -v "^${service}=" "$cred_file" 2>/dev/null)
-  printf '%s\n' "$existing" > "$cred_file"
-  echo "${service}=${value}" >> "$cred_file"
+  existing=$(grep -v "^${service}=" "$cred_file" 2>/dev/null || true)
+  { [[ -n "$existing" ]] && printf '%s\n' "$existing"; printf '%s=%s\n' "$service" "$value"; } > "$cred_file"
 }
 
 _cb_cred_file_retrieve() {
@@ -121,8 +123,16 @@ _claude_billing_restore_oauth() {
     echo "Restored claude.ai OAuth token"
   else
     echo "No OAuth backup found — launching login..."
-    claude auth login --claudeai
+    _claude_billing_login
   fi
+}
+
+_claude_billing_login() {
+  if ! command -v claude &>/dev/null; then
+    echo "claude CLI not found in PATH — run 'claude auth login --claudeai' once it is installed"
+    return 1
+  fi
+  claude auth login --claudeai
 }
 
 # --- Main function ---
@@ -133,6 +143,11 @@ claude_billing() {
 
   if [[ ! -f "$conf" ]]; then
     echo "claude-billing: no config found. Run: claude-billing config"
+    return 1
+  fi
+
+  if [[ ! -f "$settings" ]]; then
+    echo "claude-billing: ~/.claude/settings.json not found — is Claude Code installed?"
     return 1
   fi
 
@@ -159,7 +174,7 @@ claude_billing() {
           del(.ANTHROPIC_DEFAULT_OPUS_MODEL) |
           del(.ANTHROPIC_DEFAULT_HAIKU_MODEL) |
           .ANTHROPIC_API_KEY = $key
-        )' "$settings" > "$settings.tmp" && mv "$settings.tmp" "$settings"
+        )' "$settings" > "$settings.tmp" && mv "$settings.tmp" "$settings" || { rm -f "$settings.tmp"; return 1; }
       _claude_billing_backup_oauth
       echo "Switched to API usage billing — restart Claude Code to apply"
       ;;
@@ -172,7 +187,7 @@ claude_billing() {
           del(.ANTHROPIC_DEFAULT_SONNET_MODEL) |
           del(.ANTHROPIC_DEFAULT_OPUS_MODEL) |
           del(.ANTHROPIC_DEFAULT_HAIKU_MODEL)
-        )' "$settings" > "$settings.tmp" && mv "$settings.tmp" "$settings"
+        )' "$settings" > "$settings.tmp" && mv "$settings.tmp" "$settings" || { rm -f "$settings.tmp"; return 1; }
       _claude_billing_restore_oauth
       echo "Switched to claude.ai subscription — restart Claude Code to apply"
       ;;
@@ -190,21 +205,23 @@ claude_billing() {
           .ANTHROPIC_DEFAULT_SONNET_MODEL = $sonnet |
           .ANTHROPIC_DEFAULT_OPUS_MODEL = $opus |
           .ANTHROPIC_DEFAULT_HAIKU_MODEL = $haiku
-        )' "$settings" > "$settings.tmp" && mv "$settings.tmp" "$settings"
+        )' "$settings" > "$settings.tmp" && mv "$settings.tmp" "$settings" || { rm -f "$settings.tmp"; return 1; }
       _claude_billing_backup_oauth
       echo "Switched to AWS Bedrock (region: $CLAUDE_BILLING_REGION) — restart Claude Code to apply"
       ;;
 
     status)
+      local env
+      env=$(jq -r '.env' "$settings")
       local bedrock api_key
-      bedrock=$(jq -r '.env.CLAUDE_CODE_USE_BEDROCK // empty' "$settings")
-      api_key=$(jq -r '.env.ANTHROPIC_API_KEY // empty' "$settings")
+      bedrock=$(echo "$env" | jq -r '.CLAUDE_CODE_USE_BEDROCK // empty')
+      api_key=$(echo "$env" | jq -r '.ANTHROPIC_API_KEY // empty')
       if [[ -n "$bedrock" ]]; then
         echo "Current: AWS Bedrock"
-        echo "  Region:  $(jq -r '.env.AWS_REGION // "not set"' "$settings")"
-        echo "  Sonnet:  $(jq -r '.env.ANTHROPIC_DEFAULT_SONNET_MODEL // "not set"' "$settings")"
-        echo "  Opus:    $(jq -r '.env.ANTHROPIC_DEFAULT_OPUS_MODEL // "not set"' "$settings")"
-        echo "  Haiku:   $(jq -r '.env.ANTHROPIC_DEFAULT_HAIKU_MODEL // "not set"' "$settings")"
+        echo "  Region:  $(echo "$env" | jq -r '.AWS_REGION // "not set"')"
+        echo "  Sonnet:  $(echo "$env" | jq -r '.ANTHROPIC_DEFAULT_SONNET_MODEL // "not set"')"
+        echo "  Opus:    $(echo "$env" | jq -r '.ANTHROPIC_DEFAULT_OPUS_MODEL // "not set"')"
+        echo "  Haiku:   $(echo "$env" | jq -r '.ANTHROPIC_DEFAULT_HAIKU_MODEL // "not set"')"
       elif [[ -n "$api_key" ]]; then
         echo "Current: API usage billing"
       else
@@ -225,7 +242,7 @@ claude_billing() {
       ;;
 
     login)
-      claude auth login --claudeai
+      _claude_billing_login
       ;;
 
     uninstall)
@@ -265,6 +282,27 @@ claude_billing() {
       echo "  uninstall     Remove claude-billing"
       ;;
   esac
+}
+
+_claude_billing_pick_model() {
+  local label="$1"
+  local default="$2"
+  local model_list="$3"
+
+  if [[ -n "$model_list" ]]; then
+    printf "Select %s model number (or type an ID) [%s]: " "$label" "$default" >&2
+  else
+    printf "%s model ID [%s]: " "$label" "$default" >&2
+  fi
+  _cb_read -r input
+
+  if [[ -z "$input" ]]; then
+    echo "$default"
+  elif [[ "$input" =~ ^[0-9]+$ ]] && [[ -n "$model_list" ]]; then
+    echo "$model_list" | sed -n "${input}p"
+  else
+    echo "$input"
+  fi
 }
 
 _claude_billing_configure() {
@@ -312,27 +350,6 @@ _claude_billing_configure() {
     done <<< "$models"
     echo ""
   fi
-
-  _claude_billing_pick_model() {
-    local label="$1"
-    local default="$2"
-    local model_list="$3"
-
-    if [[ -n "$model_list" ]]; then
-      printf "Select %s model number (or type an ID) [%s]: " "$label" "$default" >&2
-    else
-      printf "%s model ID [%s]: " "$label" "$default" >&2
-    fi
-    _cb_read -r input
-
-    if [[ -z "$input" ]]; then
-      echo "$default"
-    elif [[ "$input" =~ ^[0-9]+$ ]] && [[ -n "$model_list" ]]; then
-      echo "$model_list" | sed -n "${input}p"
-    else
-      echo "$input"
-    fi
-  }
 
   local sonnet opus haiku
   sonnet=$(_claude_billing_pick_model "Sonnet" "${CLAUDE_BILLING_SONNET:-}" "$models")
