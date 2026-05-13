@@ -32,13 +32,58 @@ Then reload your shell:
 source ~/.zshrc   # or ~/.bashrc
 ```
 
-## Uninstall
+### What the installer asks
 
-```sh
-claude-billing uninstall
+The installer walks through setup interactively. Everything is optional — you can skip any step and configure it later.
+
+**1. Anthropic API key** *(optional)*
+```
+Do you want to save your Anthropic API key now? [y/N]:
+```
+Saves your key to the credential store (Keychain on macOS, GNOME Keyring on Linux, a chmod-600 file on Windows). Skip if you only use Bedrock or a subscription.
+
+**2. Bedrock setup** *(optional)*
+```
+Set up Bedrock models now? [y/N]:
+```
+If you answer yes, you'll be walked through:
+
+```
+How should Claude Code choose the AWS profile for Bedrock?
+  1) Inherit from shell / default AWS credential chain
+  2) Set a specific AWS_PROFILE in Claude settings
+Choose [1]:
 ```
 
-Removes `~/.claude-billing/`, `~/.claude-billing.conf`, and the source line from your shell RC file. Open a new shell to complete removal.
+Choose **1** if you use the default AWS profile or manage profiles via direnv / your shell. Choose **2** to pin a named profile directly into Claude Code's settings.
+
+If you chose 2:
+```
+AWS profile name for Claude Code Bedrock calls: my-profile
+Configure credentials for this profile now? [y/N]:
+```
+
+Then region and model IDs:
+```
+AWS region for Bedrock [us-east-1]: us-west-2
+
+Fetching available Claude models in us-west-2...
+  1) us.anthropic.claude-haiku-4-5-20251001-v1:0
+  2) us.anthropic.claude-opus-4-7-20250514-v1:0
+  3) us.anthropic.claude-sonnet-4-6-20250514-v1:0
+  ...
+
+Select Sonnet model number (or type an ID) []:
+Select Opus model number (or type an ID) []:
+Select Haiku model number (or type an ID) []:
+```
+
+If you skip Bedrock setup, a blank config is written and you can run `claude-billing config` at any time.
+
+**3. claude.ai login** *(prompted only if no OAuth token is detected)*
+```
+No claude.ai login found. Log in to your subscription now? [y/N]:
+```
 
 ## Usage
 
@@ -47,7 +92,7 @@ claude-billing subscription  # switch to claude.ai subscription (Pro, Max, Teams
 claude-billing api           # switch to Anthropic API billing
 claude-billing bedrock       # switch to AWS Bedrock
 claude-billing status        # show current mode
-claude-billing config        # reconfigure Bedrock region and model IDs
+claude-billing config        # reconfigure Bedrock region, models, and AWS profile
 claude-billing add-key       # save or update your Anthropic API key
 claude-billing login         # log in to claude.ai
 claude-billing uninstall     # remove claude-billing
@@ -69,26 +114,41 @@ Restart Claude Code after switching for changes to take effect.
 | Linux | GNOME Keyring via `secret-tool` |
 | Windows (Git Bash) | `~/.claude-billing-credentials` (chmod 600) |
 
-## Bedrock model IDs
+## Bedrock configuration
 
-Model IDs are saved to `~/.claude-billing.conf` during install (or `claude-billing config`). Re-run `claude-billing config` whenever new Claude models are released to pick up updated IDs.
+Model IDs and AWS profile settings are saved to `~/.claude-billing.conf` during install (or `claude-billing config`). Re-run `claude-billing config` whenever new Claude models are released to pick up updated IDs.
 
-A typical `~/.claude-billing.conf` looks like:
+A typical `~/.claude-billing.conf`:
 
 ```sh
 CLAUDE_BILLING_REGION="us-east-1"
 CLAUDE_BILLING_SONNET="global.anthropic.claude-sonnet-4-6"
 CLAUDE_BILLING_OPUS="global.anthropic.claude-opus-4-7"
 CLAUDE_BILLING_HAIKU="global.anthropic.claude-haiku-4-5-20251001-v1:0"
+CLAUDE_BILLING_AWS_PROFILE_MODE="inherit"
+CLAUDE_BILLING_AWS_PROFILE=""
 ```
 
 The `global.` prefix uses [Bedrock's global inference profiles](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-support.html), which route requests across regions for higher availability — recommended over pinning to a specific region.
 
-Model IDs vary by region and change as new versions are released — the interactive `claude-billing config` fetches the current list from your account automatically.
+Model IDs vary by region and change as new versions are released — `claude-billing config` fetches the current list from your account automatically.
 
-## AWS profile
+### AWS profile
 
-AWS profile is not managed by this tool — set it via direnv, your shell, or `~/.claude/settings.json` before launching Claude Code. During `claude-billing config` you can run `aws configure [--profile name]` to set up credentials for a profile, but which profile is active is left to your environment.
+During `claude-billing config` you choose how Claude Code selects the AWS profile for Bedrock calls:
+
+- **Inherit** (default): Claude Code uses whatever profile is active in your shell environment. Manage it via direnv, `AWS_PROFILE`, or `~/.aws/config`.
+- **Explicit**: a specific `AWS_PROFILE` value is written to `~/.claude/settings.json` and always used when Claude Code is running, regardless of your shell environment.
+
+Switching from explicit back to inherit removes `AWS_PROFILE` from `~/.claude/settings.json` so no stale value is left behind.
+
+## Uninstall
+
+```sh
+claude-billing uninstall
+```
+
+Removes `~/.claude-billing/`, `~/.claude-billing.conf`, and the source line from your shell RC file. Open a new shell to complete removal.
 
 ## Notes
 
