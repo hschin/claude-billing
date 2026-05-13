@@ -120,7 +120,8 @@ _claude_billing_restore_oauth() {
     _cb_cred_delete "Claude Code-credentials-backup"
     echo "Restored claude.ai OAuth token"
   else
-    echo "No OAuth backup found — run 'claude /login' after launching Claude Code to authenticate with your subscription"
+    echo "No OAuth backup found — launching login..."
+    claude /login
   fi
 }
 
@@ -223,8 +224,12 @@ claude_billing() {
       _claude_billing_configure
       ;;
 
+    login)
+      claude /login
+      ;;
+
     *)
-      echo "Usage: claude-billing [subscription|api|bedrock|status|config|add-key]"
+      echo "Usage: claude-billing [subscription|api|bedrock|status|config|add-key|login]"
       echo ""
       echo "  subscription  Use claude.ai subscription (Pro, Max, Teams, Enterprise)"
       echo "  api           Use Anthropic API key billing"
@@ -232,6 +237,7 @@ claude_billing() {
       echo "  status        Show current billing mode"
       echo "  config        Reconfigure Bedrock region and model IDs"
       echo "  add-key       Save your Anthropic API key to the credential store"
+      echo "  login         Log in to claude.ai"
       ;;
   esac
 }
