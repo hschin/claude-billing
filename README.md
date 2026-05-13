@@ -1,4 +1,4 @@
-# Easy Claude Code Billing Mode Switcher
+# claude-billing — Instant billing mode switching for Claude Code
 
 A shell utility for switching [Claude Code](https://claude.ai/code) between billing modes without manually editing config files. Install once, switch instantly.
 
