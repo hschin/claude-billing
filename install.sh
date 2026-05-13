@@ -81,15 +81,18 @@ echo "Downloading claude_billing.sh..."
 curl -fsSL "$REPO_URL/claude_billing.sh" -o "$FUNC_FILE"
 chmod 644 "$FUNC_FILE"
 
-# Add source line to shell rc
+# Add source block to shell rc (marker comments allow precise removal on uninstall)
 RC_FILE=$(detect_shell_rc)
-SOURCE_LINE="source \"$FUNC_FILE\"  # claude-billing"
 
 if grep -q "claude-billing" "$RC_FILE" 2>/dev/null; then
   echo "claude-billing already present in $RC_FILE — skipping."
 else
-  echo "" >> "$RC_FILE"
-  echo "$SOURCE_LINE" >> "$RC_FILE"
+  {
+    echo ""
+    echo "# >>> claude-billing >>>"
+    echo "source \"$FUNC_FILE\""
+    echo "# <<< claude-billing <<<"
+  } >> "$RC_FILE"
   echo "Added to $RC_FILE"
 fi
 

@@ -138,6 +138,7 @@ _cb_settings_update() {
   local settings="$1" filter="$2"
   shift 2
   _cb_require_cmd jq "install with: brew install jq / apt install jq / winget install jqlang.jq" || return 1
+  cp "$settings" "${settings}.bak" 2>/dev/null || true
   local tmp
   tmp=$(mktemp "${settings}.XXXXXX")
   if jq "$@" "$filter" "$settings" > "$tmp" && mv "$tmp" "$settings"; then
@@ -339,9 +340,15 @@ _claude_billing_uninstall() {
 
   local rc rctmp
   for rc in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.profile"; do
-    if grep -q "claude-billing" "$rc" 2>/dev/null; then
+    if grep -q ">>> claude-billing >>>" "$rc" 2>/dev/null; then
       rctmp=$(mktemp "${rc}.XXXXXX")
-      # shellcheck disable=SC2015  # || rm is intentional cleanup, not an else branch
+      # shellcheck disable=SC2015
+      awk '/# >>> claude-billing >>>/{skip=1} !skip{print} /# <<< claude-billing <<</{skip=0}' \
+        "$rc" > "$rctmp" && mv "$rctmp" "$rc" || rm -f "$rctmp"
+      echo "Removed source block from $rc"
+    elif grep -q "claude-billing" "$rc" 2>/dev/null; then
+      rctmp=$(mktemp "${rc}.XXXXXX")
+      # shellcheck disable=SC2015
       grep -v "claude-billing" "$rc" > "$rctmp" && mv "$rctmp" "$rc" || rm -f "$rctmp"
       echo "Removed source line from $rc"
     fi
@@ -350,6 +357,24 @@ _claude_billing_uninstall() {
   rm -f "$HOME/.claude-billing.conf"
   rm -rf "$HOME/.claude-billing"
 
+  echo ""
+  printf "Remove stored Anthropic API key from credential store? [y/N]: "
+  local remove_key=""
+  _cb_read -r remove_key
+  if [[ "$remove_key" =~ ^[Yy]$ ]]; then
+    _cb_cred_delete "anthropic-api-key"
+    echo "Removed Anthropic API key"
+  fi
+
+  printf "Remove claude.ai OAuth backup from credential store? [y/N]: "
+  local remove_oauth=""
+  _cb_read -r remove_oauth
+  if [[ "$remove_oauth" =~ ^[Yy]$ ]]; then
+    _cb_cred_delete "Claude Code-credentials-backup"
+    echo "Removed OAuth backup"
+  fi
+
+  echo ""
   echo "Uninstalled. Open a new shell to complete removal."
 }
 
