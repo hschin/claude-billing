@@ -218,6 +218,7 @@ claude_billing() {
           del(.ANTHROPIC_DEFAULT_SONNET_MODEL) |
           del(.ANTHROPIC_DEFAULT_OPUS_MODEL) |
           del(.ANTHROPIC_DEFAULT_HAIKU_MODEL) |
+          del(.ANTHROPIC_DEFAULT_FABLE_MODEL) |
           .ANTHROPIC_API_KEY = env.ANTHROPIC_API_KEY
         )' || return 1
       _claude_billing_backup_oauth
@@ -232,7 +233,8 @@ claude_billing() {
           del(.ANTHROPIC_API_KEY) |
           del(.ANTHROPIC_DEFAULT_SONNET_MODEL) |
           del(.ANTHROPIC_DEFAULT_OPUS_MODEL) |
-          del(.ANTHROPIC_DEFAULT_HAIKU_MODEL)
+          del(.ANTHROPIC_DEFAULT_HAIKU_MODEL) |
+          del(.ANTHROPIC_DEFAULT_FABLE_MODEL)
         )' || return 1
       _claude_billing_restore_oauth
       echo "Switched to claude.ai subscription — restart Claude Code to apply"
@@ -241,11 +243,12 @@ claude_billing() {
     bedrock)
       [[ ! -f "$conf" ]] && { echo "claude-billing: no config found. Run: claude-billing config"; return 1; }
       [[ ! -f "$settings" ]] && { echo "claude-billing: ~/.claude/settings.json not found — is Claude Code installed?"; return 1; }
-      local region sonnet opus haiku profile_mode aws_profile
+      local region sonnet opus haiku fable profile_mode aws_profile
       region=$(_cb_conf_get "$conf" CLAUDE_BILLING_REGION)
       sonnet=$(_cb_conf_get "$conf" CLAUDE_BILLING_SONNET)
       opus=$(_cb_conf_get "$conf"   CLAUDE_BILLING_OPUS)
       haiku=$(_cb_conf_get "$conf"  CLAUDE_BILLING_HAIKU)
+      fable=$(_cb_conf_get "$conf"  CLAUDE_BILLING_FABLE)
       profile_mode=$(_cb_conf_get "$conf" CLAUDE_BILLING_AWS_PROFILE_MODE)
       aws_profile=$(_cb_conf_get "$conf"  CLAUDE_BILLING_AWS_PROFILE)
       if [[ -z "$region" || -z "$sonnet" || -z "$opus" || -z "$haiku" ]]; then
@@ -261,12 +264,15 @@ claude_billing() {
           .ANTHROPIC_DEFAULT_SONNET_MODEL = $sonnet |
           .ANTHROPIC_DEFAULT_OPUS_MODEL = $opus |
           .ANTHROPIC_DEFAULT_HAIKU_MODEL = $haiku |
+          if $fable != "" then .ANTHROPIC_DEFAULT_FABLE_MODEL = $fable
+          else del(.ANTHROPIC_DEFAULT_FABLE_MODEL) end |
           if $mode == "explicit" then .AWS_PROFILE = $profile
           else del(.AWS_PROFILE) end
         )' \
         --arg sonnet "$sonnet" \
         --arg opus "$opus" \
         --arg haiku "$haiku" \
+        --arg fable "$fable" \
         --arg region "$region" \
         --arg mode "$profile_mode" \
         --arg profile "$aws_profile" || return 1
@@ -285,7 +291,8 @@ claude_billing() {
           "  Profile: \(if ($e.AWS_PROFILE // "") != "" then $e.AWS_PROFILE else "inherited/default" end)",
           "  Sonnet:  \($e.ANTHROPIC_DEFAULT_SONNET_MODEL // "not set")",
           "  Opus:    \($e.ANTHROPIC_DEFAULT_OPUS_MODEL // "not set")",
-          "  Haiku:   \($e.ANTHROPIC_DEFAULT_HAIKU_MODEL // "not set")"
+          "  Haiku:   \($e.ANTHROPIC_DEFAULT_HAIKU_MODEL // "not set")",
+          "  Fable:   \($e.ANTHROPIC_DEFAULT_FABLE_MODEL // "not set")"
         elif ($e.ANTHROPIC_API_KEY // "") != "" then
           "Current: API usage billing"
         else
@@ -410,12 +417,13 @@ _claude_billing_configure() {
   echo ""
 
   local conf="$HOME/.claude-billing.conf"
-  local saved_region saved_sonnet saved_opus saved_haiku saved_mode saved_aws_profile
+  local saved_region saved_sonnet saved_opus saved_haiku saved_fable saved_mode saved_aws_profile
   if [[ -f "$conf" ]]; then
     saved_region=$(_cb_conf_get "$conf" CLAUDE_BILLING_REGION)
     saved_sonnet=$(_cb_conf_get "$conf" CLAUDE_BILLING_SONNET)
     saved_opus=$(_cb_conf_get "$conf"   CLAUDE_BILLING_OPUS)
     saved_haiku=$(_cb_conf_get "$conf"  CLAUDE_BILLING_HAIKU)
+    saved_fable=$(_cb_conf_get "$conf"  CLAUDE_BILLING_FABLE)
     saved_mode=$(_cb_conf_get "$conf"   CLAUDE_BILLING_AWS_PROFILE_MODE)
     saved_aws_profile=$(_cb_conf_get "$conf" CLAUDE_BILLING_AWS_PROFILE)
   fi
@@ -488,16 +496,18 @@ _claude_billing_configure() {
     echo ""
   fi
 
-  local sonnet opus haiku
+  local sonnet opus haiku fable
   sonnet=$(_claude_billing_pick_model "Sonnet" "${saved_sonnet:-}" "$models")
   opus=$(_claude_billing_pick_model "Opus" "${saved_opus:-}" "$models")
   haiku=$(_claude_billing_pick_model "Haiku" "${saved_haiku:-}" "$models")
+  fable=$(_claude_billing_pick_model "Fable" "${saved_fable:-}" "$models")
 
   cat > "$HOME/.claude-billing.conf" <<EOF
 CLAUDE_BILLING_REGION="$region"
 CLAUDE_BILLING_SONNET="$sonnet"
 CLAUDE_BILLING_OPUS="$opus"
 CLAUDE_BILLING_HAIKU="$haiku"
+CLAUDE_BILLING_FABLE="$fable"
 CLAUDE_BILLING_AWS_PROFILE_MODE="$profile_mode"
 CLAUDE_BILLING_AWS_PROFILE="$aws_profile"
 EOF
@@ -513,6 +523,7 @@ EOF
   echo "  Sonnet:  $sonnet"
   echo "  Opus:    $opus"
   echo "  Haiku:   $haiku"
+  echo "  Fable:   ${fable:-(not set)}"
   if [[ "$profile_mode" == "explicit" ]] && [[ ! "$setup_creds" =~ ^[Yy]$ ]]; then
     echo ""
     echo "Note: run 'aws configure --profile $aws_profile' before switching to Bedrock if you haven't already."
