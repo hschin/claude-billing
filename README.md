@@ -93,22 +93,54 @@ No claude.ai login found. Log in to your subscription now? [y/N]:
 ## Usage
 
 ```sh
-claude-billing subscription  # switch to claude.ai subscription (Pro, Max, Teams, Enterprise)
-claude-billing api           # switch to Anthropic API billing
-claude-billing bedrock       # switch to AWS Bedrock
-claude-billing status        # show current mode
-claude-billing config        # reconfigure Bedrock region, models, and AWS profile
-claude-billing add-key       # save or update your Anthropic API key
-claude-billing login         # log in to claude.ai
-claude-billing uninstall     # remove claude-billing
+claude-billing subscription          # switch to claude.ai subscription (Pro, Max, Teams, Enterprise)
+claude-billing api                   # switch to Anthropic API billing
+claude-billing bedrock               # switch to AWS Bedrock
+claude-billing status                # show current mode
+claude-billing accounts              # list registered subscription accounts
+claude-billing add-account <name>    # register a claude.ai subscription account
+claude-billing remove-account <name> # remove an account and its stored token
+claude-billing config                # reconfigure Bedrock region, models, and AWS profile
+claude-billing add-key               # save or update your Anthropic API key
+claude-billing login                 # log in to claude.ai
+claude-billing uninstall             # remove claude-billing
 ```
 
 Restart Claude Code after switching for changes to take effect.
+
+## Multiple subscription accounts
+
+If you have more than one claude.ai subscription (say, work and personal), register each as a named account and toggle between them:
+
+```sh
+# Register your current login under a name
+claude-billing add-account work
+# You're currently logged in to claude.ai. Save that login as 'work'? [Y/n]: y
+
+# Register a second account — your current login is stashed, then a fresh login launches
+claude-billing add-account personal
+
+# Toggle between them (sub is a shorthand alias)
+claude-billing subscription work
+claude-billing sub personal
+```
+
+Switching stashes the outgoing account's OAuth token in the credential store and restores the incoming one, so you never re-authenticate once both are registered. Switching to `api` or `bedrock` stashes the active account's token the same way.
+
+Once accounts are registered, `claude-billing subscription` requires the account name. Account names may contain letters, digits, `-`, and `_`.
+
+```sh
+claude-billing accounts
+# Subscription accounts:
+# * work (live login)
+#   personal (token stored)
+```
 
 ## How it works
 
 - Edits `~/.claude/settings.json` to set the correct env vars and model IDs for each mode
 - Backs up and restores your claude.ai OAuth token to/from the credential store so you don't need to re-login when switching back to your subscription
+- Named subscription accounts each get their own token slot in the credential store; a small registry file (`~/.claude-billing-accounts`) tracks which account owns the live token
 - Bedrock model IDs are fetched live from `aws bedrock list-foundation-models` during setup so they're always valid for your region
 
 ## Credential storage
@@ -153,7 +185,7 @@ Switching from explicit back to inherit removes `AWS_PROFILE` from `~/.claude/se
 claude-billing uninstall
 ```
 
-Removes `~/.claude-billing/`, `~/.claude-billing.conf`, and the source line from your shell RC file. Open a new shell to complete removal.
+Removes `~/.claude-billing/`, `~/.claude-billing.conf`, `~/.claude-billing-accounts`, and the source line from your shell RC file, and offers to delete stored secrets. Open a new shell to complete removal.
 
 ## Support boundaries
 
@@ -168,6 +200,7 @@ Removes `~/.claude-billing/`, `~/.claude-billing.conf`, and the source line from
 | `~/.claude/settings.json` | Edited on every mode switch to set/remove env vars |
 | `~/.claude/settings.json.bak` | Overwritten before each switch as a recovery backup |
 | `~/.claude-billing.conf` | Stores your Bedrock region, model IDs, and AWS profile config |
+| `~/.claude-billing-accounts` | Registry of named subscription accounts and which one is active |
 | `~/.claude-billing/claude_billing.sh` | The installed script |
 | Your shell RC file (`.zshrc`, `.bashrc`, or `.profile`) | Source block added on install, removed on uninstall |
 
@@ -178,6 +211,7 @@ Removes `~/.claude-billing/`, `~/.claude-billing.conf`, and the source line from
 | Anthropic API key | `anthropic-api-key` |
 | claude.ai OAuth token (live) | `Claude Code-credentials` |
 | claude.ai OAuth token (backup) | `Claude Code-credentials-backup` |
+| claude.ai OAuth token (named account) | `Claude Code-credentials-acct-<name>` |
 
 On Windows (Git Bash), secrets are stored in `~/.claude-billing-credentials` with permissions `600`.
 

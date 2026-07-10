@@ -2,6 +2,7 @@
 # claude-billing: switch Claude Code between billing modes (subscription, API, Bedrock)
 _CB_VERSION="1.0.0"
 # Config: ~/.claude-billing.conf
+# Accounts: ~/.claude-billing-accounts (named claude.ai subscription logins)
 # Requires: jq, aws CLI (for Bedrock)
 # macOS: uses Keychain (security CLI)
 # Linux: uses GNOME Keyring (secret-tool)
@@ -135,6 +136,62 @@ _cb_cred_file_delete() {
     && mv "$tmp" "$cred_file" || rm -f "$tmp"
 }
 
+# --- Subscription account registry ---
+# Named claude.ai logins are stored in the credential store as
+# "Claude Code-credentials-acct-<name>". The registry file tracks which names
+# exist and which one owns the live "Claude Code-credentials" token. Slots for
+# inactive accounts hold their stashed tokens; the active account's token is
+# always the live one.
+
+_cb_acct_service() {
+  printf 'Claude Code-credentials-acct-%s' "$1"
+}
+
+_cb_accounts_list() {
+  local f="$HOME/.claude-billing-accounts"
+  [[ -f "$f" ]] && _cb_conf_get "$f" CLAUDE_BILLING_ACCOUNTS
+  return 0
+}
+
+_cb_active_get() {
+  local f="$HOME/.claude-billing-accounts"
+  [[ -f "$f" ]] && _cb_conf_get "$f" CLAUDE_BILLING_ACTIVE
+  return 0
+}
+
+_cb_accounts_write() {
+  printf 'CLAUDE_BILLING_ACCOUNTS="%s"\nCLAUDE_BILLING_ACTIVE="%s"\n' "$1" "$2" \
+    > "$HOME/.claude-billing-accounts"
+}
+
+_cb_active_set() {
+  _cb_accounts_write "$(_cb_accounts_list)" "$1"
+}
+
+_cb_account_registered() {
+  local name="$1" a
+  for a in $(_cb_accounts_list); do
+    [[ "$a" == "$name" ]] && return 0
+  done
+  return 1
+}
+
+_cb_account_register() {
+  local list
+  list=$(_cb_accounts_list)
+  _cb_accounts_write "${list:+$list }$1" "$(_cb_active_get)"
+}
+
+_cb_account_unregister() {
+  local name="$1" a list="" active
+  for a in $(_cb_accounts_list); do
+    [[ "$a" == "$name" ]] || list="${list:+$list }$a"
+  done
+  active=$(_cb_active_get)
+  [[ "$active" == "$name" ]] && active=""
+  _cb_accounts_write "$list" "$active"
+}
+
 _cb_settings_update() {
   local settings="$1" filter="$2"
   shift 2
@@ -151,17 +208,27 @@ _cb_settings_update() {
 
 # --- OAuth backup / restore ---
 
+# Stash the live token into the active account's slot, or the legacy backup
+# slot when no account owns it.
 _claude_billing_backup_oauth() {
-  local oauth
+  local oauth active dest
   oauth=$(_cb_cred_retrieve "Claude Code-credentials")
-  if [[ -n "$oauth" ]]; then
-    # Only delete the live token after confirming the backup was written
-    if _cb_cred_store "Claude Code-credentials-backup" "$oauth"; then
-      _cb_cred_delete "Claude Code-credentials"
-    else
-      echo "claude-billing: failed to write OAuth backup — not removing live token" >&2
-      return 1
+  [[ -z "$oauth" ]] && return 0
+  active=$(_cb_active_get)
+  if [[ -n "$active" ]]; then
+    dest=$(_cb_acct_service "$active")
+  else
+    dest="Claude Code-credentials-backup"
+  fi
+  # Only delete the live token after confirming the backup was written
+  if _cb_cred_store "$dest" "$oauth"; then
+    _cb_cred_delete "Claude Code-credentials"
+    if [[ -n "$active" ]]; then
+      _cb_active_set ""
     fi
+  else
+    echo "claude-billing: failed to write OAuth backup — not removing live token" >&2
+    return 1
   fi
 }
 
@@ -180,6 +247,27 @@ _claude_billing_restore_oauth() {
   else
     echo "No OAuth backup found — launching login..."
     _claude_billing_login
+  fi
+}
+
+_claude_billing_restore_account() {
+  local name="$1" backup
+  backup=$(_cb_cred_retrieve "$(_cb_acct_service "$name")")
+  if [[ -n "$backup" ]]; then
+    # Only delete the stored copy after confirming the live token was restored
+    if _cb_cred_store "Claude Code-credentials" "$backup"; then
+      _cb_cred_delete "$(_cb_acct_service "$name")"
+      _cb_active_set "$name"
+      echo "Restored claude.ai OAuth token for account '$name'"
+    else
+      echo "claude-billing: failed to restore OAuth token for '$name' — stored copy preserved" >&2
+      return 1
+    fi
+  elif [[ "$(_cb_active_get)" == "$name" && -n "$(_cb_cred_retrieve "Claude Code-credentials")" ]]; then
+    echo "Already logged in as '$name'"
+  else
+    echo "No stored token for '$name' — launching login..."
+    _claude_billing_login && _cb_active_set "$name"
   fi
 }
 
@@ -225,8 +313,27 @@ claude_billing() {
       echo "Switched to API usage billing — restart Claude Code to apply"
       ;;
 
-    subscription)
+    subscription|sub)
       [[ ! -f "$settings" ]] && { echo "claude-billing: ~/.claude/settings.json not found — is Claude Code installed?"; return 1; }
+      local acct="${2:-}" accounts a
+      accounts=$(_cb_accounts_list)
+      if [[ -n "$accounts" ]]; then
+        if [[ -z "$acct" ]]; then
+          echo "claude-billing: account name required. Saved accounts:"
+          for a in $(_cb_accounts_list); do echo "  $a"; done
+          echo "Usage: claude-billing subscription <name>"
+          return 1
+        fi
+        if ! _cb_account_registered "$acct"; then
+          echo "claude-billing: unknown account '$acct'. Saved accounts:"
+          for a in $(_cb_accounts_list); do echo "  $a"; done
+          echo "Add it with: claude-billing add-account $acct"
+          return 1
+        fi
+      elif [[ -n "$acct" ]]; then
+        echo "claude-billing: no accounts registered yet — add one with: claude-billing add-account $acct"
+        return 1
+      fi
       _cb_settings_update "$settings" '
         .env |= (
           del(.CLAUDE_CODE_USE_BEDROCK) |
@@ -236,8 +343,103 @@ claude_billing() {
           del(.ANTHROPIC_DEFAULT_HAIKU_MODEL) |
           del(.ANTHROPIC_DEFAULT_FABLE_MODEL)
         )' || return 1
-      _claude_billing_restore_oauth
-      echo "Switched to claude.ai subscription — restart Claude Code to apply"
+      if [[ -n "$acct" ]]; then
+        # Stash the current account's live token before restoring the target's
+        if [[ "$(_cb_active_get)" != "$acct" ]]; then
+          _claude_billing_backup_oauth || return 1
+        fi
+        _claude_billing_restore_account "$acct" || return 1
+        echo "Switched to claude.ai subscription (account: $acct) — restart Claude Code to apply"
+      else
+        _claude_billing_restore_oauth
+        echo "Switched to claude.ai subscription — restart Claude Code to apply"
+      fi
+      ;;
+
+    accounts)
+      local accounts active a
+      accounts=$(_cb_accounts_list)
+      if [[ -z "$accounts" ]]; then
+        echo "No subscription accounts registered."
+        echo "Add one with: claude-billing add-account <name>"
+        return 0
+      fi
+      active=$(_cb_active_get)
+      echo "Subscription accounts:"
+      for a in $(_cb_accounts_list); do
+        if [[ "$a" == "$active" ]]; then
+          echo "* $a (live login)"
+        elif [[ -n "$(_cb_cred_retrieve "$(_cb_acct_service "$a")")" ]]; then
+          echo "  $a (token stored)"
+        else
+          echo "  $a (no stored token — will prompt login)"
+        fi
+      done
+      ;;
+
+    add-account)
+      local name="${2:-}"
+      [[ -z "$name" ]] && { echo "Usage: claude-billing add-account <name>"; return 1; }
+      if [[ ! "$name" =~ ^[A-Za-z0-9_-]+$ ]]; then
+        echo "claude-billing: account names may only contain letters, digits, '-' and '_'"
+        return 1
+      fi
+      if _cb_account_registered "$name"; then
+        echo "claude-billing: account '$name' already exists"
+        return 1
+      fi
+      local live legacy adopt=""
+      live=$(_cb_cred_retrieve "Claude Code-credentials")
+      legacy=$(_cb_cred_retrieve "Claude Code-credentials-backup")
+      if [[ -n "$live" && -z "$(_cb_active_get)" ]]; then
+        printf "You're currently logged in to claude.ai. Save that login as '%s'? [Y/n]: " "$name"
+        _cb_read -r adopt
+        if [[ ! "$adopt" =~ ^[Nn]$ ]]; then
+          _cb_account_register "$name"
+          _cb_active_set "$name"
+          echo "Account '$name' added (current live login)."
+          echo "Switch between accounts with: claude-billing subscription <name>"
+          return 0
+        fi
+      elif [[ -z "$live" && -n "$legacy" && -z "$(_cb_accounts_list)" ]]; then
+        printf "Found a stored claude.ai login backup. Save it as '%s'? [Y/n]: " "$name"
+        _cb_read -r adopt
+        if [[ ! "$adopt" =~ ^[Nn]$ ]]; then
+          if _cb_cred_store "$(_cb_acct_service "$name")" "$legacy"; then
+            _cb_cred_delete "Claude Code-credentials-backup"
+            _cb_account_register "$name"
+            echo "Account '$name' added. Switch to it with: claude-billing subscription $name"
+            return 0
+          fi
+          echo "claude-billing: failed to store token for '$name'" >&2
+          return 1
+        fi
+      fi
+      # Fresh login: stash the current login (if any), then authenticate
+      _claude_billing_backup_oauth || return 1
+      echo "Launching claude.ai login for '$name'..."
+      _claude_billing_login || return 1
+      _cb_account_register "$name"
+      _cb_active_set "$name"
+      echo "Account '$name' added and is now the live login."
+      echo "Switch between accounts with: claude-billing subscription <name>"
+      ;;
+
+    remove-account)
+      local name="${2:-}" confirm=""
+      [[ -z "$name" ]] && { echo "Usage: claude-billing remove-account <name>"; return 1; }
+      if ! _cb_account_registered "$name"; then
+        echo "claude-billing: unknown account '$name'"
+        return 1
+      fi
+      if [[ "$(_cb_active_get)" == "$name" ]]; then
+        printf "'%s' is the current live login. Remove it from claude-billing anyway? (You stay logged in.) [y/N]: " "$name"
+        _cb_read -r confirm
+        [[ "$confirm" =~ ^[Yy]$ ]] || { echo "Aborted."; return 1; }
+      fi
+      _cb_cred_delete "$(_cb_acct_service "$name")"
+      _cb_account_unregister "$name"
+      echo "Removed account '$name'"
       ;;
 
     bedrock)
@@ -283,7 +485,7 @@ claude_billing() {
     status)
       [[ ! -f "$settings" ]] && { echo "claude-billing: ~/.claude/settings.json not found — is Claude Code installed?"; return 1; }
       _cb_require_cmd jq "install with: brew install jq / apt install jq / winget install jqlang.jq" || return 1
-      jq -r '
+      jq -r --arg active "$(_cb_active_get)" '
         .env as $e |
         if ($e.CLAUDE_CODE_USE_BEDROCK // "") != "" then
           "Current: AWS Bedrock",
@@ -296,7 +498,8 @@ claude_billing() {
         elif ($e.ANTHROPIC_API_KEY // "") != "" then
           "Current: API usage billing"
         else
-          "Current: claude.ai subscription"
+          "Current: claude.ai subscription" +
+            (if $active != "" then " (account: \($active))" else "" end)
         end' "$settings"
       ;;
 
@@ -325,25 +528,32 @@ claude_billing() {
       ;;
 
     *)
-      echo "Usage: claude-billing [subscription|api|bedrock|status|config|add-key|login|version|uninstall]"
+      echo "Usage: claude-billing <command> [name]"
       echo ""
-      echo "  subscription  Use claude.ai subscription (Pro, Max, Teams, Enterprise)"
-      echo "  api           Use Anthropic API key billing"
-      echo "  bedrock       Use AWS Bedrock"
-      echo "  status        Show current billing mode"
-      echo "  config        Reconfigure Bedrock region, models, and AWS profile"
-      echo "  add-key       Save or update your Anthropic API key"
-      echo "  login         Log in to claude.ai"
-      echo "  version       Show version"
-      echo "  uninstall     Remove claude-billing"
+      echo "  subscription [name]    Use claude.ai subscription (alias: sub; name required"
+      echo "                         once accounts are registered)"
+      echo "  api                    Use Anthropic API key billing"
+      echo "  bedrock                Use AWS Bedrock"
+      echo "  status                 Show current billing mode"
+      echo "  accounts               List registered subscription accounts"
+      echo "  add-account <name>     Register a claude.ai subscription account"
+      echo "  remove-account <name>  Remove an account and its stored token"
+      echo "  config                 Reconfigure Bedrock region, models, and AWS profile"
+      echo "  add-key                Save or update your Anthropic API key"
+      echo "  login                  Log in to claude.ai"
+      echo "  version                Show version"
+      echo "  uninstall              Remove claude-billing"
       ;;
   esac
 }
 
 _claude_billing_uninstall() {
+  local accounts_list
+  accounts_list=$(_cb_accounts_list)
   echo "This will remove:"
-  echo "  ~/.claude-billing/       (scripts)"
-  echo "  ~/.claude-billing.conf   (config)"
+  echo "  ~/.claude-billing/          (scripts)"
+  echo "  ~/.claude-billing.conf      (config)"
+  echo "  ~/.claude-billing-accounts  (account registry)"
   echo "  source line from your shell RC file"
   echo ""
   printf "Continue? [y/N]: "
@@ -367,7 +577,7 @@ _claude_billing_uninstall() {
     fi
   done
 
-  rm -f "$HOME/.claude-billing.conf"
+  rm -f "$HOME/.claude-billing.conf" "$HOME/.claude-billing-accounts"
   rm -rf "$HOME/.claude-billing"
 
   echo ""
@@ -385,6 +595,18 @@ _claude_billing_uninstall() {
   if [[ "$remove_oauth" =~ ^[Yy]$ ]]; then
     _cb_cred_delete "Claude Code-credentials-backup"
     echo "Removed OAuth backup"
+  fi
+
+  if [[ -n "$accounts_list" ]]; then
+    printf "Remove stored subscription account tokens (%s)? [y/N]: " "$accounts_list"
+    local remove_accts="" a
+    _cb_read -r remove_accts
+    if [[ "$remove_accts" =~ ^[Yy]$ ]]; then
+      for a in $(printf '%s' "$accounts_list"); do
+        _cb_cred_delete "$(_cb_acct_service "$a")"
+      done
+      echo "Removed stored account tokens"
+    fi
   fi
 
   echo ""
