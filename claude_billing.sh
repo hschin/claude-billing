@@ -303,6 +303,150 @@ _claude_billing_restore_account() {
   fi
 }
 
+# --- Desktop app (Claude.app) login switching ---
+# The claude.ai desktop app keeps its login as Electron profile cookies
+# (values encrypted with the per-machine "Claude Safe Storage" keychain key,
+# so cookie files can be swapped between accounts on the same machine) plus
+# OAuth token caches in its config.json. Swapping both moves the login.
+# Stashes live in ~/.claude-billing/desktop/<name>/ (chmod 700/600); the
+# sensitive values inside are already encrypted by Claude Safe Storage.
+# .active in the stash root tracks which account owns the live desktop login —
+# separate from CLAUDE_BILLING_ACTIVE because api/bedrock switches clear that
+# without touching the desktop app.
+
+_cb_desktop_app_dir() {
+  printf '%s/Library/Application Support/Claude' "$HOME"
+}
+
+_cb_desktop_stash_root() {
+  printf '%s/.claude-billing/desktop' "$HOME"
+}
+
+_cb_desktop_available() {
+  [[ -d "$(_cb_desktop_app_dir)" ]]
+}
+
+_cb_desktop_owner_get() {
+  cat "$(_cb_desktop_stash_root)/.active" 2>/dev/null
+  return 0
+}
+
+_cb_desktop_owner_set() {
+  mkdir -p "$(_cb_desktop_stash_root)" && chmod 700 "$(_cb_desktop_stash_root)" || return 1
+  printf '%s\n' "$1" > "$(_cb_desktop_stash_root)/.active"
+}
+
+# Chromium rewrites the cookie DB on exit, so swapping while the app runs
+# would be lost or corrupted — the app must quit first.
+_cb_desktop_quit() {
+  pgrep -xq Claude || return 0
+  local confirm="" i=0
+  printf "Claude.app must quit to switch its login. Quit it now? [Y/n]: "
+  _cb_read -r confirm
+  [[ "$confirm" =~ ^[Nn]$ ]] && return 1
+  osascript -e 'quit app "Claude"' 2>/dev/null
+  while pgrep -xq Claude; do
+    i=$((i+1))
+    if [[ "$i" -gt 20 ]]; then
+      echo "claude-billing: Claude.app did not quit" >&2
+      return 1
+    fi
+    sleep 0.5
+  done
+  return 0
+}
+
+# Copy the live desktop login into <name>'s stash. Copies are verified before
+# being trusted; live files are never removed here.
+_cb_desktop_backup() {
+  local name="$1" app dir
+  app=$(_cb_desktop_app_dir)
+  dir="$(_cb_desktop_stash_root)/$name"
+  mkdir -p "$dir" && chmod 700 "$dir" || return 1
+  if [[ -f "$app/Cookies" ]]; then
+    if ! { cp "$app/Cookies" "$dir/Cookies.new" && cmp -s "$app/Cookies" "$dir/Cookies.new" && \
+           chmod 600 "$dir/Cookies.new" && mv "$dir/Cookies.new" "$dir/Cookies"; }; then
+      rm -f "$dir/Cookies.new"
+      return 1
+    fi
+  fi
+  if [[ -f "$app/config.json" ]]; then
+    if jq -c '{
+         "oauth:tokenCache": .["oauth:tokenCache"],
+         "oauth:tokenCacheV2": .["oauth:tokenCacheV2"],
+         "lastKnownAccountUuid": .lastKnownAccountUuid
+       } | with_entries(select(.value != null))' \
+       "$app/config.json" > "$dir/config-oauth.json.new" 2>/dev/null; then
+      chmod 600 "$dir/config-oauth.json.new" && mv "$dir/config-oauth.json.new" "$dir/config-oauth.json"
+    else
+      rm -f "$dir/config-oauth.json.new"
+      return 1
+    fi
+  fi
+  return 0
+}
+
+# Restore <name>'s stashed desktop login, or clear the live login when nothing
+# is stashed (mirrors the CLI "launching login" path). Stale Cookies-journal is
+# always removed so it can't replay against a swapped DB.
+_cb_desktop_restore() {
+  local name="$1" app dir
+  app=$(_cb_desktop_app_dir)
+  dir="$(_cb_desktop_stash_root)/$name"
+  if [[ -f "$dir/Cookies" ]]; then
+    if ! { cp "$dir/Cookies" "$app/Cookies.new" && cmp -s "$dir/Cookies" "$app/Cookies.new" && \
+           chmod 600 "$app/Cookies.new" && mv "$app/Cookies.new" "$app/Cookies"; }; then
+      rm -f "$app/Cookies.new"
+      return 1
+    fi
+    rm -f "$app/Cookies-journal" "$dir/Cookies"
+    if [[ -s "$dir/config-oauth.json" ]]; then
+      # shellcheck disable=SC2016  # $meta is a jq variable, not shell
+      _cb_settings_update "$app/config.json" '. + $meta[0]' --slurpfile meta "$dir/config-oauth.json" && \
+        rm -f "$dir/config-oauth.json"
+    fi
+    echo "Desktop app: restored Claude.app login for '$name'"
+  else
+    rm -f "$app/Cookies" "$app/Cookies-journal"
+    [[ -f "$app/config.json" ]] && _cb_settings_update "$app/config.json" \
+      'del(.["oauth:tokenCache"], .["oauth:tokenCacheV2"], .lastKnownAccountUuid)'
+    echo "Desktop app: no saved login for '$name' — sign in when you next open Claude.app"
+  fi
+  return 0
+}
+
+# Move the desktop app login to <acct>. prev_active seeds ownership the first
+# time, before the .active marker exists. Failures leave the live login
+# untouched and never fail the overall switch.
+_cb_desktop_switch() {
+  local acct="$1" prev="$2" owner
+  _cb_desktop_available || return 0
+  owner=$(_cb_desktop_owner_get)
+  [[ -z "$owner" ]] && owner="$prev"
+  [[ "$owner" == "$acct" ]] && return 0
+  if ! _cb_desktop_quit; then
+    echo "Desktop app: Claude.app login left unchanged"
+    return 0
+  fi
+  if [[ -n "$owner" ]]; then
+    if ! _cb_desktop_backup "$owner"; then
+      echo "claude-billing: failed to stash desktop login for '$owner' — Claude.app left unchanged" >&2
+      return 0
+    fi
+  elif [[ -f "$(_cb_desktop_app_dir)/Cookies" ]]; then
+    # Can't tell whose login this is — keep a safety copy before replacing it.
+    # Dot-prefixed so it can never collide with a real account name.
+    _cb_desktop_backup ".unclaimed" || return 0
+    echo "claude-billing: couldn't tell which account owned the desktop login — copy kept in $(_cb_desktop_stash_root)/.unclaimed" >&2
+  fi
+  if _cb_desktop_restore "$acct"; then
+    _cb_desktop_owner_set "$acct"
+  else
+    echo "claude-billing: failed to restore desktop login for '$acct' — stash preserved" >&2
+  fi
+  return 0
+}
+
 _claude_billing_login() {
   if ! command -v claude &>/dev/null; then
     echo "claude CLI not found in PATH — run 'claude auth login --claudeai' once it is installed"
@@ -376,11 +520,14 @@ claude_billing() {
           del(.ANTHROPIC_DEFAULT_FABLE_MODEL)
         )' || return 1
       if [[ -n "$acct" ]]; then
+        local prev_active
+        prev_active=$(_cb_active_get)
         # Stash the current account's live token before restoring the target's
-        if [[ "$(_cb_active_get)" != "$acct" ]]; then
+        if [[ "$prev_active" != "$acct" ]]; then
           _claude_billing_backup_oauth || return 1
         fi
         _claude_billing_restore_account "$acct" || return 1
+        _cb_desktop_switch "$acct" "$prev_active"
         echo "Switched to claude.ai subscription (account: $acct) — restart Claude Code to apply"
       else
         _claude_billing_restore_oauth
@@ -471,6 +618,8 @@ claude_billing() {
       fi
       _cb_cred_delete "$(_cb_acct_service "$name")"
       _cb_cred_delete "$(_cb_acct_meta_service "$name")"
+      rm -rf "$(_cb_desktop_stash_root)/${name:?}"
+      [[ "$(_cb_desktop_owner_get)" == "$name" ]] && rm -f "$(_cb_desktop_stash_root)/.active"
       _cb_account_unregister "$name"
       echo "Removed account '$name'"
       ;;
@@ -584,7 +733,7 @@ _claude_billing_uninstall() {
   local accounts_list
   accounts_list=$(_cb_accounts_list)
   echo "This will remove:"
-  echo "  ~/.claude-billing/          (scripts)"
+  echo "  ~/.claude-billing/          (scripts and stashed desktop app logins)"
   echo "  ~/.claude-billing.conf      (config)"
   echo "  ~/.claude-billing-accounts  (account registry)"
   echo "  source line from your shell RC file"

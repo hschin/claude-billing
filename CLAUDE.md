@@ -16,6 +16,7 @@ Shell utility (sourced, not executed — must work in bash AND zsh) that switche
 - Account registry: `~/.claude-billing-accounts` (keys `CLAUDE_BILLING_ACCOUNTS` space-separated, `CLAUDE_BILLING_ACTIVE`). Active account's token is always the live one; inactive accounts hold stashed tokens. `_claude_billing_backup_oauth` stashes into the active account's slot (or legacy backup if none) and clears active.
 - Once accounts are registered, `subscription`/`sub` requires a name; account-less usage keeps legacy single-backup behavior (backward compat).
 - Bedrock config: `~/.claude-billing.conf` (region, model IDs incl. Fable, AWS profile mode).
+- Desktop app (Claude.app, macOS): login = `Cookies` SQLite (sessionKey, values encrypted by per-machine "Claude Safe Storage" keychain key — swappable between accounts) + `oauth:tokenCache`/`oauth:tokenCacheV2`/`lastKnownAccountUuid` in the app's `config.json`. Stashed per account in `~/.claude-billing/desktop/<name>/`; owner tracked in `desktop/.active` (separate from `CLAUDE_BILLING_ACTIVE` — api/bedrock switches clear that but don't touch the desktop). App must be quit before swap (Chromium rewrites cookies on exit); `_cb_desktop_quit` prompts + osascript. All desktop failures warn but never fail the switch. Unknown owner → safety copy in `desktop/.unclaimed`.
 
 ## Gotchas
 

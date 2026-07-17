@@ -127,6 +127,8 @@ claude-billing sub personal
 
 Switching stashes the outgoing account's OAuth token in the credential store and restores the incoming one, so you never re-authenticate once both are registered. Switching to `api` or `bedrock` stashes the active account's token the same way.
 
+**Desktop app (macOS):** if Claude.app is installed, switching accounts also moves its login. The app must quit for the swap (you'll be prompted), and each account's desktop session is stashed under `~/.claude-billing/desktop/<name>/` — the session cookies and token caches inside are encrypted with the app's own per-machine "Claude Safe Storage" key. The first time you switch to an account with no stashed desktop session, Claude.app opens signed out and you log in once; after that, switches carry the desktop login too.
+
 Once accounts are registered, `claude-billing subscription` requires the account name. Account names may contain letters, digits, `-`, and `_`.
 
 ```sh
@@ -203,6 +205,8 @@ Removes `~/.claude-billing/`, `~/.claude-billing.conf`, `~/.claude-billing-accou
 | `~/.claude-billing.conf` | Stores your Bedrock region, model IDs, and AWS profile config |
 | `~/.claude-billing-accounts` | Registry of named subscription accounts and which one is active |
 | `~/.claude-billing/claude_billing.sh` | The installed script |
+| `~/.claude-billing/desktop/<name>/` | Stashed Claude.app desktop logins (contents encrypted by Claude Safe Storage) |
+| `~/Library/Application Support/Claude/` | Desktop app profile — `Cookies` and `config.json` swapped on account switch (macOS) |
 | Your shell RC file (`.zshrc`, `.bashrc`, or `.profile`) | Source block added on install, removed on uninstall |
 
 **Secrets stored (never written to disk unencrypted except on Windows):**
