@@ -1,6 +1,6 @@
 # shellcheck shell=bash
 # claude-billing: switch Claude Code between billing modes (subscription, API, Bedrock)
-_CB_VERSION="1.1.0"
+_CB_VERSION="1.2.0"
 # Config: ~/.claude-billing.conf
 # Accounts: ~/.claude-billing-accounts (named claude.ai subscription logins)
 # Requires: jq, aws CLI (for Bedrock)
