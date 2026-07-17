@@ -222,6 +222,26 @@ _cb_account_unregister() {
   _cb_accounts_write "$list" "$active"
 }
 
+# --- Billing mode state (for shell prompts) ---
+# Each switch records the resulting mode ("sub", "sub:<account>", "api",
+# "bedrock") in ~/.claude-billing-mode so prompts can show it without parsing
+# settings.json. `claude-billing status` rewrites it from settings.json, which
+# stays the source of truth.
+
+_cb_mode_set() {
+  printf '%s\n' "$1" > "$HOME/.claude-billing-mode"
+}
+
+# Print the current billing mode for embedding in a shell prompt (e.g. a
+# Starship custom module or zsh precmd). Prints nothing until the first
+# switch; run `claude-billing status` to seed or resync the state file.
+claude_billing_prompt() {
+  local mode="" f="$HOME/.claude-billing-mode"
+  [[ -f "$f" ]] || return 0
+  IFS= read -r mode < "$f" || true
+  printf '%s' "$mode"
+}
+
 _cb_settings_update() {
   local settings="$1" filter="$2"
   shift 2
@@ -489,6 +509,7 @@ claude_billing() {
           .ANTHROPIC_API_KEY = env.ANTHROPIC_API_KEY
         )' || return 1
       _claude_billing_backup_oauth
+      _cb_mode_set "api"
       echo "Switched to API usage billing — restart Claude Code to apply"
       ;;
 
@@ -530,12 +551,14 @@ claude_billing() {
           _claude_billing_backup_oauth || return 1
         fi
         _claude_billing_restore_account "$acct" || return 1
+        _cb_mode_set "sub:$acct"
         echo "Switched to claude.ai subscription (account: $acct) — restart Claude Code to apply"
         if _cb_desktop_available && [[ "$(_cb_desktop_owner_get)" != "$acct" ]]; then
           echo "Claude.app desktop login unchanged — move it with: claude-billing desktop $acct"
         fi
       else
         _claude_billing_restore_oauth
+        _cb_mode_set "sub"
         echo "Switched to claude.ai subscription — restart Claude Code to apply"
       fi
       ;;
@@ -716,6 +739,7 @@ claude_billing() {
         --arg mode "$profile_mode" \
         --arg profile "$aws_profile" || return 1
       _claude_billing_backup_oauth
+      _cb_mode_set "bedrock"
       echo "Switched to AWS Bedrock (region: $region) — restart Claude Code to apply"
       ;;
 
@@ -743,6 +767,15 @@ claude_billing() {
         desk_owner=$(_cb_desktop_owner_get)
         echo "Desktop (Claude.app): ${desk_owner:-unknown account}"
       fi
+      # Resync the prompt state file from settings.json (the source of truth)
+      local mode
+      mode=$(jq -r --arg active "$(_cb_active_get)" '
+        .env as $e |
+        if ($e.CLAUDE_CODE_USE_BEDROCK // "") != "" then "bedrock"
+        elif ($e.ANTHROPIC_API_KEY // "") != "" then "api"
+        elif $active != "" then "sub:\($active)"
+        else "sub" end' "$settings")
+      [[ -n "$mode" ]] && _cb_mode_set "$mode"
       ;;
 
     add-key)
@@ -797,6 +830,7 @@ _claude_billing_uninstall() {
   echo "  ~/.claude-billing/          (scripts and stashed desktop app logins)"
   echo "  ~/.claude-billing.conf      (config)"
   echo "  ~/.claude-billing-accounts  (account registry)"
+  echo "  ~/.claude-billing-mode      (prompt state)"
   echo "  source line from your shell RC file"
   echo ""
   printf "Continue? [y/N]: "
@@ -820,7 +854,7 @@ _claude_billing_uninstall() {
     fi
   done
 
-  rm -f "$HOME/.claude-billing.conf" "$HOME/.claude-billing-accounts"
+  rm -f "$HOME/.claude-billing.conf" "$HOME/.claude-billing-accounts" "$HOME/.claude-billing-mode"
   rm -rf "$HOME/.claude-billing"
 
   echo ""

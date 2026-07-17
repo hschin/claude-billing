@@ -148,6 +148,32 @@ claude-billing accounts
 
 `[desktop]` marks the account that owns the Claude.app desktop login (macOS).
 
+## Prompt indicator
+
+Every switch records the resulting mode in `~/.claude-billing-mode` (`sub:work`, `api`, `bedrock`), so your shell prompt can show which billing you're on. With [Starship](https://starship.rs), add to `~/.config/starship.toml`:
+
+```toml
+[custom.claude_billing]
+command = "cat ~/.claude-billing-mode"
+when = "test -s ~/.claude-billing-mode"
+format = "[($output)]($style) "
+style = "bold #DA7756"
+shell = ["sh"]
+```
+
+For a plain zsh/bash prompt, the sourced script provides `claude_billing_prompt`, which prints the mode (empty before the first switch):
+
+```sh
+# zsh (.zshrc, after the claude-billing source line)
+setopt PROMPT_SUBST
+RPROMPT='%F{yellow}$(claude_billing_prompt)%f'
+
+# bash (.bashrc)
+PS1='$(claude_billing_prompt) '"$PS1"
+```
+
+The state file is only a cache — if you hand-edit `~/.claude/settings.json`, run `claude-billing status` to resync it.
+
 ## How it works
 
 - Edits `~/.claude/settings.json` to set the correct env vars and model IDs for each mode
@@ -214,6 +240,7 @@ Removes `~/.claude-billing/`, `~/.claude-billing.conf`, `~/.claude-billing-accou
 | `~/.claude.json` | `oauthAccount` section swapped on account switch (backup in `~/.claude.json.bak`) |
 | `~/.claude-billing.conf` | Stores your Bedrock region, model IDs, and AWS profile config |
 | `~/.claude-billing-accounts` | Registry of named subscription accounts and which one is active |
+| `~/.claude-billing-mode` | Current billing mode, for shell prompt indicators (resynced by `status`) |
 | `~/.claude-billing/claude_billing.sh` | The installed script |
 | `~/.claude-billing/desktop/<name>/` | Stashed Claude.app desktop logins (contents encrypted by Claude Safe Storage) |
 | `~/Library/Application Support/Claude/` | Desktop app profile — `Cookies` and `config.json` swapped by `desktop <name>` (macOS) |
