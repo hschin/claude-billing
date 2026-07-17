@@ -172,6 +172,22 @@ RPROMPT='%F{yellow}$(claude_billing_prompt)%f'
 PS1='$(claude_billing_prompt) '"$PS1"
 ```
 
+The same file works in a [Claude Code status line](https://docs.claude.com/en/docs/claude-code/statusline). If you already have a `statusLine` command script, append the mode to its output:
+
+```sh
+billing=$(cat "$HOME/.claude-billing-mode" 2>/dev/null)
+[ -n "$billing" ] && parts="$parts $billing"
+```
+
+Or for a minimal statusline from scratch, set in `~/.claude/settings.json`:
+
+```json
+"statusLine": {
+  "type": "command",
+  "command": "sh -c 'printf \"%s %s\" \"$(jq -r .model.display_name)\" \"$(cat ~/.claude-billing-mode 2>/dev/null)\"'"
+}
+```
+
 The state file is only a cache — if you hand-edit `~/.claude/settings.json`, run `claude-billing status` to resync it.
 
 ## How it works
