@@ -311,8 +311,10 @@ _claude_billing_restore_account() {
 # Stashes live in ~/.claude-billing/desktop/<name>/ (chmod 700/600); the
 # sensitive values inside are already encrypted by Claude Safe Storage.
 # .active in the stash root tracks which account owns the live desktop login —
-# separate from CLAUDE_BILLING_ACTIVE because api/bedrock switches clear that
-# without touching the desktop app.
+# fully independent of CLAUDE_BILLING_ACTIVE: the desktop app only ever uses a
+# claude.ai subscription login (no API/Bedrock mode), so it is switched only
+# by the explicit `claude-billing desktop <name>` command, never as a side
+# effect of a CLI billing switch.
 
 _cb_desktop_app_dir() {
   printf '%s/Library/Application Support/Claude' "$HOME"
@@ -415,9 +417,10 @@ _cb_desktop_restore() {
   return 0
 }
 
-# Move the desktop app login to <acct>. prev_active seeds ownership the first
-# time, before the .active marker exists. Failures leave the live login
-# untouched and never fail the overall switch.
+# Move the desktop app login to <acct>. prev seeds ownership the first time,
+# before the .active marker exists (the `desktop` command asks the user whose
+# login it is). Failures leave the live login untouched and never fail the
+# overall switch.
 _cb_desktop_switch() {
   local acct="$1" prev="$2" owner
   _cb_desktop_available || return 0
@@ -527,8 +530,10 @@ claude_billing() {
           _claude_billing_backup_oauth || return 1
         fi
         _claude_billing_restore_account "$acct" || return 1
-        _cb_desktop_switch "$acct" "$prev_active"
         echo "Switched to claude.ai subscription (account: $acct) — restart Claude Code to apply"
+        if _cb_desktop_available && [[ "$(_cb_desktop_owner_get)" != "$acct" ]]; then
+          echo "Claude.app desktop login unchanged — move it with: claude-billing desktop $acct"
+        fi
       else
         _claude_billing_restore_oauth
         echo "Switched to claude.ai subscription — restart Claude Code to apply"
@@ -544,14 +549,18 @@ claude_billing() {
         return 0
       fi
       active=$(_cb_active_get)
+      local desk
+      desk=$(_cb_desktop_owner_get)
       echo "Subscription accounts:"
       for a in $(_cb_accounts_list); do
+        local marker=""
+        [[ "$a" == "$desk" ]] && marker=" [desktop]"
         if [[ "$a" == "$active" ]]; then
-          echo "* $a (live login)"
+          echo "* $a (live login)$marker"
         elif [[ -n "$(_cb_cred_retrieve "$(_cb_acct_service "$a")")" ]]; then
-          echo "  $a (token stored)"
+          echo "  $a (token stored)$marker"
         else
-          echo "  $a (no stored token — will prompt login)"
+          echo "  $a (no stored token — will prompt login)$marker"
         fi
       done
       ;;
@@ -624,6 +633,52 @@ claude_billing() {
       echo "Removed account '$name'"
       ;;
 
+    desktop)
+      if ! _cb_desktop_available; then
+        echo "claude-billing: Claude.app not found — desktop login switching is macOS-only"
+        return 1
+      fi
+      local name="${2:-}" owner a
+      owner=$(_cb_desktop_owner_get)
+      if [[ -z "$name" ]]; then
+        echo "Claude.app login: ${owner:-unknown account}"
+        if [[ -n "$(_cb_accounts_list)" ]]; then
+          echo "Saved accounts:"
+          for a in $(_cb_accounts_list); do echo "  $a"; done
+        fi
+        echo "Usage: claude-billing desktop <name>"
+        return 0
+      fi
+      if ! _cb_account_registered "$name"; then
+        echo "claude-billing: unknown account '$name'. Saved accounts:"
+        for a in $(_cb_accounts_list); do echo "  $a"; done
+        echo "Add it with: claude-billing add-account $name"
+        return 1
+      fi
+      if [[ "$owner" == "$name" ]]; then
+        echo "Claude.app is already logged in as '$name'"
+        return 0
+      fi
+      # First switch: the live login predates ownership tracking — ask whose
+      # it is so it gets stashed under that name instead of .unclaimed.
+      if [[ -z "$owner" && -f "$(_cb_desktop_app_dir)/Cookies" ]]; then
+        local claim=""
+        printf "Which account is Claude.app currently logged in to? (Enter if unsure): "
+        _cb_read -r claim
+        if [[ -n "$claim" ]] && ! _cb_account_registered "$claim"; then
+          echo "claude-billing: unknown account '$claim' — the current login will be kept in $(_cb_desktop_stash_root)/.unclaimed instead"
+          claim=""
+        fi
+        if [[ "$claim" == "$name" ]]; then
+          _cb_desktop_owner_set "$name"
+          echo "Claude.app is already logged in as '$name'"
+          return 0
+        fi
+        owner="$claim"
+      fi
+      _cb_desktop_switch "$name" "$owner"
+      ;;
+
     bedrock)
       [[ ! -f "$conf" ]] && { echo "claude-billing: no config found. Run: claude-billing config"; return 1; }
       [[ ! -f "$settings" ]] && { echo "claude-billing: ~/.claude/settings.json not found — is Claude Code installed?"; return 1; }
@@ -683,6 +738,11 @@ claude_billing() {
           "Current: claude.ai subscription" +
             (if $active != "" then " (account: \($active))" else "" end)
         end' "$settings"
+      if _cb_desktop_available; then
+        local desk_owner
+        desk_owner=$(_cb_desktop_owner_get)
+        echo "Desktop (Claude.app): ${desk_owner:-unknown account}"
+      fi
       ;;
 
     add-key)
@@ -720,6 +780,7 @@ claude_billing() {
       echo "  accounts               List registered subscription accounts"
       echo "  add-account <name>     Register a claude.ai subscription account"
       echo "  remove-account <name>  Remove an account and its stored token"
+      echo "  desktop [name]         Show or switch the Claude.app desktop login (macOS)"
       echo "  config                 Reconfigure Bedrock region, models, and AWS profile"
       echo "  add-key                Save or update your Anthropic API key"
       echo "  login                  Log in to claude.ai"
