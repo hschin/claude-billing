@@ -12,6 +12,7 @@ Shell utility (sourced, not executed — must work in bash AND zsh) that switche
 
 - Credential store per platform: macOS Keychain (`security`), Linux GNOME Keyring (`secret-tool`), Windows Git Bash `~/.claude-billing-credentials` (chmod 600). Abstracted via `_cb_cred_store/retrieve/delete`.
 - Live OAuth token: keychain service `Claude Code-credentials`. Legacy single backup: `Claude Code-credentials-backup`. Named subscription accounts (v1.1.0+): `Claude Code-credentials-acct-<name>`.
+- Account identity metadata: Claude Code stores the logged-in account's identity (`oauthAccount`: account/org UUIDs, subscription type) in `~/.claude.json` — if it doesn't match the live token, Claude Code forces re-login. Per-account stash: `Claude Code-oauthAccount-acct-<name>`; swapped into `~/.claude.json` on restore via jq (`_cb_acct_meta_backup/_restore`). Best-effort: failures warn but don't abort the switch. Legacy (account-less) flow never swaps it — same account, still matches.
 - Account registry: `~/.claude-billing-accounts` (keys `CLAUDE_BILLING_ACCOUNTS` space-separated, `CLAUDE_BILLING_ACTIVE`). Active account's token is always the live one; inactive accounts hold stashed tokens. `_claude_billing_backup_oauth` stashes into the active account's slot (or legacy backup if none) and clears active.
 - Once accounts are registered, `subscription`/`sub` requires a name; account-less usage keeps legacy single-backup behavior (backward compat).
 - Bedrock config: `~/.claude-billing.conf` (region, model IDs incl. Fable, AWS profile mode).

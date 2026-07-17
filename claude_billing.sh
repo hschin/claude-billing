@@ -147,6 +147,36 @@ _cb_acct_service() {
   printf 'Claude Code-credentials-acct-%s' "$1"
 }
 
+# Claude Code also records the logged-in account's identity (account UUID,
+# org UUID, subscription type) in ~/.claude.json under .oauthAccount. If that
+# doesn't match the live OAuth token, Claude Code forces a re-login — so each
+# account's metadata is stashed alongside its token and swapped on restore.
+_cb_acct_meta_service() {
+  printf 'Claude Code-oauthAccount-acct-%s' "$1"
+}
+
+_cb_acct_meta_backup() {
+  local name="$1" meta
+  meta=$(jq -c '.oauthAccount // empty' "$HOME/.claude.json" 2>/dev/null)
+  [[ -z "$meta" ]] && return 0
+  _cb_cred_store "$(_cb_acct_meta_service "$name")" "$meta" || \
+    echo "claude-billing: warning: failed to stash account metadata for '$name'" >&2
+}
+
+_cb_acct_meta_restore() {
+  local name="$1" meta
+  meta=$(_cb_cred_retrieve "$(_cb_acct_meta_service "$name")")
+  [[ -z "$meta" ]] && return 0
+  [[ -f "$HOME/.claude.json" ]] || return 0
+  # Only delete the stored copy after it has been written into ~/.claude.json
+  if OAUTH_META="$meta" _cb_settings_update "$HOME/.claude.json" \
+       '.oauthAccount = (env.OAUTH_META | fromjson)'; then
+    _cb_cred_delete "$(_cb_acct_meta_service "$name")"
+  else
+    echo "claude-billing: warning: failed to apply account metadata for '$name' — Claude Code may prompt for login" >&2
+  fi
+}
+
 _cb_accounts_list() {
   local f="$HOME/.claude-billing-accounts"
   [[ -f "$f" ]] && _cb_conf_get "$f" CLAUDE_BILLING_ACCOUNTS
@@ -222,6 +252,7 @@ _claude_billing_backup_oauth() {
   fi
   # Only delete the live token after confirming the backup was written
   if _cb_cred_store "$dest" "$oauth"; then
+    [[ -n "$active" ]] && _cb_acct_meta_backup "$active"
     _cb_cred_delete "Claude Code-credentials"
     if [[ -n "$active" ]]; then
       _cb_active_set ""
@@ -258,6 +289,7 @@ _claude_billing_restore_account() {
     if _cb_cred_store "Claude Code-credentials" "$backup"; then
       _cb_cred_delete "$(_cb_acct_service "$name")"
       _cb_active_set "$name"
+      _cb_acct_meta_restore "$name"
       echo "Restored claude.ai OAuth token for account '$name'"
     else
       echo "claude-billing: failed to restore OAuth token for '$name' — stored copy preserved" >&2
@@ -438,6 +470,7 @@ claude_billing() {
         [[ "$confirm" =~ ^[Yy]$ ]] || { echo "Aborted."; return 1; }
       fi
       _cb_cred_delete "$(_cb_acct_service "$name")"
+      _cb_cred_delete "$(_cb_acct_meta_service "$name")"
       _cb_account_unregister "$name"
       echo "Removed account '$name'"
       ;;
@@ -604,6 +637,7 @@ _claude_billing_uninstall() {
     if [[ "$remove_accts" =~ ^[Yy]$ ]]; then
       for a in $(printf '%s' "$accounts_list"); do
         _cb_cred_delete "$(_cb_acct_service "$a")"
+        _cb_cred_delete "$(_cb_acct_meta_service "$a")"
       done
       echo "Removed stored account tokens"
     fi

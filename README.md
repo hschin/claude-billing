@@ -199,6 +199,7 @@ Removes `~/.claude-billing/`, `~/.claude-billing.conf`, `~/.claude-billing-accou
 |------|---------|
 | `~/.claude/settings.json` | Edited on every mode switch to set/remove env vars |
 | `~/.claude/settings.json.bak` | Overwritten before each switch as a recovery backup |
+| `~/.claude.json` | `oauthAccount` section swapped on account switch (backup in `~/.claude.json.bak`) |
 | `~/.claude-billing.conf` | Stores your Bedrock region, model IDs, and AWS profile config |
 | `~/.claude-billing-accounts` | Registry of named subscription accounts and which one is active |
 | `~/.claude-billing/claude_billing.sh` | The installed script |
@@ -212,6 +213,7 @@ Removes `~/.claude-billing/`, `~/.claude-billing.conf`, `~/.claude-billing-accou
 | claude.ai OAuth token (live) | `Claude Code-credentials` |
 | claude.ai OAuth token (backup) | `Claude Code-credentials-backup` |
 | claude.ai OAuth token (named account) | `Claude Code-credentials-acct-<name>` |
+| claude.ai account metadata (named account) | `Claude Code-oauthAccount-acct-<name>` |
 
 On Windows (Git Bash), secrets are stored in `~/.claude-billing-credentials` with permissions `600`.
 
