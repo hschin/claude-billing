@@ -78,13 +78,22 @@ check_deps "$PLATFORM"
 # Download function file
 mkdir -p "$INSTALL_DIR"
 echo "Downloading claude_billing.sh..."
-curl -fsSL "$REPO_URL/claude_billing.sh" -o "$FUNC_FILE"
-chmod 644 "$FUNC_FILE"
+DOWNLOAD_TMP=$(mktemp "$INSTALL_DIR/.claude_billing.sh.XXXXXX")
+if curl -fsSL "$REPO_URL/claude_billing.sh" -o "$DOWNLOAD_TMP" && \
+   [[ -s "$DOWNLOAD_TMP" ]] && bash -n "$DOWNLOAD_TMP" && \
+   chmod 644 "$DOWNLOAD_TMP" && mv "$DOWNLOAD_TMP" "$FUNC_FILE"; then
+  :
+else
+  rm -f "$DOWNLOAD_TMP"
+  echo "Error: failed to download claude_billing.sh; existing installation was preserved." >&2
+  exit 1
+fi
 
 # Add source block to shell rc (marker comments allow precise removal on uninstall)
 RC_FILE=$(detect_shell_rc)
 
-if grep -q "claude-billing" "$RC_FILE" 2>/dev/null; then
+if grep -Fqx "# >>> claude-billing >>>" "$RC_FILE" 2>/dev/null || \
+   grep -Fqx "source \"$FUNC_FILE\"" "$RC_FILE" 2>/dev/null; then
   echo "claude-billing already present in $RC_FILE — skipping."
 else
   {

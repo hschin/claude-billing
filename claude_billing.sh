@@ -87,16 +87,25 @@ _cb_cred_retrieve() {
 }
 
 _cb_cred_delete() {
-  local service="$1"
+  local service="$1" rc
   case "$(_cb_platform)" in
     macos)
-      security delete-generic-password -s "$service" -a "$USER" 2>/dev/null
+      if security delete-generic-password -s "$service" -a "$USER" 2>/dev/null; then
+        return 0
+      else
+        rc=$?
+        # security returns 44 when no matching item exists.
+        [[ "$rc" -eq 44 ]]
+      fi
       ;;
     linux)
       secret-tool clear service "$service" account "$USER" 2>/dev/null
       ;;
     windows)
       _cb_cred_file_delete "$service"
+      ;;
+    *)
+      return 1
       ;;
   esac
 }
@@ -130,10 +139,13 @@ _cb_cred_file_delete() {
   local cred_file="$HOME/.claude-billing-credentials"
   [[ -f "$cred_file" ]] || return 0
   local tmp
-  tmp=$(mktemp "${cred_file}.XXXXXX") && chmod 600 "$tmp"
-  # shellcheck disable=SC2015  # || rm is intentional cleanup, not an else branch
-  awk -v svc="$service" 'substr($0,1,length(svc)+1) != svc "="' "$cred_file" > "$tmp" \
-    && mv "$tmp" "$cred_file" || rm -f "$tmp"
+  tmp=$(mktemp "${cred_file}.XXXXXX") && chmod 600 "$tmp" || return 1
+  if awk -v svc="$service" 'substr($0,1,length(svc)+1) != svc "="' "$cred_file" > "$tmp" && \
+     mv "$tmp" "$cred_file"; then
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
 }
 
 # --- Subscription account registry ---
@@ -253,6 +265,15 @@ _cb_settings_update() {
     return 0
   fi
   rm -f "$tmp"
+  return 1
+}
+
+_cb_settings_rollback() {
+  local settings="$1"
+  if [[ -f "${settings}.bak" ]] && cp "${settings}.bak" "$settings"; then
+    return 0
+  fi
+  echo "claude-billing: warning: failed to restore ${settings}.bak" >&2
   return 1
 }
 
@@ -581,7 +602,10 @@ claude_billing() {
           del(.ANTHROPIC_DEFAULT_FABLE_MODEL) |
           .ANTHROPIC_API_KEY = env.ANTHROPIC_API_KEY
         )' || return 1
-      _claude_billing_backup_oauth
+      if ! _claude_billing_backup_oauth; then
+        _cb_settings_rollback "$settings"
+        return 1
+      fi
       _cb_mode_set "api"
       echo "Switched to API usage billing — restart Claude Code to apply"
       ;;
@@ -630,7 +654,10 @@ claude_billing() {
           echo "Claude.app desktop login unchanged — move it with: claude-billing desktop $acct"
         fi
       else
-        _claude_billing_restore_oauth
+        if ! _claude_billing_restore_oauth; then
+          _cb_settings_rollback "$settings"
+          return 1
+        fi
         _cb_mode_set "sub"
         echo "Switched to claude.ai subscription — restart Claude Code to apply"
       fi
@@ -721,8 +748,11 @@ claude_billing() {
         _cb_read -r confirm
         [[ "$confirm" =~ ^[Yy]$ ]] || { echo "Aborted."; return 1; }
       fi
-      _cb_cred_delete "$(_cb_acct_service "$name")"
-      _cb_cred_delete "$(_cb_acct_meta_service "$name")"
+      if ! _cb_cred_delete "$(_cb_acct_service "$name")" || \
+         ! _cb_cred_delete "$(_cb_acct_meta_service "$name")"; then
+        echo "claude-billing: failed to remove stored credentials for '$name' — account kept for retry" >&2
+        return 1
+      fi
       rm -rf "$(_cb_desktop_stash_root)/${name:?}"
       [[ "$(_cb_desktop_owner_get)" == "$name" ]] && rm -f "$(_cb_desktop_stash_root)/.active"
       _cb_account_unregister "$name"
@@ -815,7 +845,10 @@ claude_billing() {
         --arg region "$region" \
         --arg mode "$profile_mode" \
         --arg profile "$aws_profile" || return 1
-      _claude_billing_backup_oauth
+      if ! _claude_billing_backup_oauth; then
+        _cb_settings_rollback "$settings"
+        return 1
+      fi
       _cb_mode_set "bedrock"
       echo "Switched to AWS Bedrock (region: $region) — restart Claude Code to apply"
       ;;
@@ -856,10 +889,17 @@ claude_billing() {
       ;;
 
     add-key)
+      local key=""
       printf "Enter your Anthropic API key: "
-      _cb_read -rs key
+      _cb_read -rs key || { echo ""; echo "claude-billing: failed to read API key" >&2; return 1; }
       echo ""
-      _cb_cred_store "anthropic-api-key" "$key"
+      [[ -z "$key" ]] && { echo "claude-billing: API key cannot be empty" >&2; return 1; }
+      if ! _cb_cred_store "anthropic-api-key" "$key"; then
+        key=""
+        echo "claude-billing: failed to save API key" >&2
+        return 1
+      fi
+      key=""
       echo "API key saved"
       ;;
 
@@ -901,7 +941,7 @@ claude_billing() {
 }
 
 _claude_billing_uninstall() {
-  local accounts_list
+  local accounts_list cleanup_failed=0
   accounts_list=$(_cb_accounts_list)
   echo "This will remove:"
   echo "  ~/.claude-billing/          (scripts and stashed desktop app logins)"
@@ -915,19 +955,29 @@ _claude_billing_uninstall() {
   _cb_read -r confirm
   [[ "$confirm" =~ ^[Yy]$ ]] || { echo "Aborted."; return 1; }
 
-  local rc rctmp
+  local rc rctmp legacy_source
+  legacy_source="source \"$HOME/.claude-billing/claude_billing.sh\""
   for rc in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.profile"; do
     if grep -q ">>> claude-billing >>>" "$rc" 2>/dev/null; then
-      rctmp=$(mktemp "${rc}.XXXXXX")
-      # shellcheck disable=SC2015
-      awk '/# >>> claude-billing >>>/{skip=1} !skip{print} /# <<< claude-billing <<</{skip=0}' \
-        "$rc" > "$rctmp" && mv "$rctmp" "$rc" || rm -f "$rctmp"
-      echo "Removed source block from $rc"
-    elif grep -q "claude-billing" "$rc" 2>/dev/null; then
-      rctmp=$(mktemp "${rc}.XXXXXX")
-      # shellcheck disable=SC2015
-      grep -v "claude-billing" "$rc" > "$rctmp" && mv "$rctmp" "$rc" || rm -f "$rctmp"
-      echo "Removed source line from $rc"
+      if rctmp=$(mktemp "${rc}.XXXXXX") && \
+         awk '/# >>> claude-billing >>>/{skip=1} !skip{print} /# <<< claude-billing <<</{skip=0}' \
+           "$rc" > "$rctmp" && mv "$rctmp" "$rc"; then
+        echo "Removed source block from $rc"
+      else
+        rm -f "${rctmp:-}"
+        echo "claude-billing: failed to remove source block from $rc" >&2
+        cleanup_failed=1
+      fi
+    elif grep -Fqx "$legacy_source" "$rc" 2>/dev/null; then
+      # awk returns success even when removing the only line in the file.
+      if rctmp=$(mktemp "${rc}.XXXXXX") && \
+         awk -v target="$legacy_source" '$0 != target' "$rc" > "$rctmp" && mv "$rctmp" "$rc"; then
+        echo "Removed source line from $rc"
+      else
+        rm -f "${rctmp:-}"
+        echo "claude-billing: failed to remove source line from $rc" >&2
+        cleanup_failed=1
+      fi
     fi
   done
 
@@ -939,32 +989,51 @@ _claude_billing_uninstall() {
   local remove_key=""
   _cb_read -r remove_key
   if [[ "$remove_key" =~ ^[Yy]$ ]]; then
-    _cb_cred_delete "anthropic-api-key"
-    echo "Removed Anthropic API key"
+    if _cb_cred_delete "anthropic-api-key"; then
+      echo "Removed Anthropic API key"
+    else
+      echo "claude-billing: failed to remove Anthropic API key; it may remain in the credential store" >&2
+      cleanup_failed=1
+    fi
   fi
 
   printf "Remove claude.ai OAuth backup from credential store? [y/N]: "
   local remove_oauth=""
   _cb_read -r remove_oauth
   if [[ "$remove_oauth" =~ ^[Yy]$ ]]; then
-    _cb_cred_delete "Claude Code-credentials-backup"
-    echo "Removed OAuth backup"
+    if _cb_cred_delete "Claude Code-credentials-backup"; then
+      echo "Removed OAuth backup"
+    else
+      echo "claude-billing: failed to remove OAuth backup; it may remain in the credential store" >&2
+      cleanup_failed=1
+    fi
   fi
 
   if [[ -n "$accounts_list" ]]; then
     printf "Remove stored subscription account tokens (%s)? [y/N]: " "$accounts_list"
-    local remove_accts="" a
+    local remove_accts="" a account_cleanup_failed=0
     _cb_read -r remove_accts
     if [[ "$remove_accts" =~ ^[Yy]$ ]]; then
       for a in $(printf '%s' "$accounts_list"); do
-        _cb_cred_delete "$(_cb_acct_service "$a")"
-        _cb_cred_delete "$(_cb_acct_meta_service "$a")"
+        if ! _cb_cred_delete "$(_cb_acct_service "$a")" || \
+           ! _cb_cred_delete "$(_cb_acct_meta_service "$a")"; then
+          echo "claude-billing: failed to remove all stored credentials for '$a'" >&2
+          account_cleanup_failed=1
+        fi
       done
-      echo "Removed stored account tokens"
+      if [[ "$account_cleanup_failed" -eq 0 ]]; then
+        echo "Removed stored account tokens"
+      else
+        cleanup_failed=1
+      fi
     fi
   fi
 
   echo ""
+  if [[ "$cleanup_failed" -ne 0 ]]; then
+    echo "Uninstalled with warnings: some credentials may remain in the platform credential store." >&2
+    return 1
+  fi
   echo "Uninstalled. Open a new shell to complete removal."
 }
 
