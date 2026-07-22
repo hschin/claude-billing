@@ -381,30 +381,45 @@ _cb_desktop_quit() {
 # Copy the live desktop login into <name>'s stash. Copies are verified before
 # being trusted; live files are never removed here.
 _cb_desktop_backup() {
-  local name="$1" app dir
+  local name="$1" app root dir stage old=""
   app=$(_cb_desktop_app_dir)
-  dir="$(_cb_desktop_stash_root)/$name"
-  mkdir -p "$dir" && chmod 700 "$dir" || return 1
+  root=$(_cb_desktop_stash_root)
+  dir="$root/$name"
+  mkdir -p "$root" && chmod 700 "$root" || return 1
+  stage=$(mktemp -d "$root/.${name}.new.XXXXXX") || return 1
+  chmod 700 "$stage" || { rm -rf "$stage"; return 1; }
   if [[ -f "$app/Cookies" ]]; then
-    if ! { cp "$app/Cookies" "$dir/Cookies.new" && cmp -s "$app/Cookies" "$dir/Cookies.new" && \
-           chmod 600 "$dir/Cookies.new" && mv "$dir/Cookies.new" "$dir/Cookies"; }; then
-      rm -f "$dir/Cookies.new"
+    if ! { cp "$app/Cookies" "$stage/Cookies" && cmp -s "$app/Cookies" "$stage/Cookies" && \
+           chmod 600 "$stage/Cookies"; }; then
+      rm -rf "$stage"
       return 1
     fi
   fi
   if [[ -f "$app/config.json" ]]; then
-    if jq -c '{
+    if ! jq -c '{
          "oauth:tokenCache": .["oauth:tokenCache"],
          "oauth:tokenCacheV2": .["oauth:tokenCacheV2"],
          "lastKnownAccountUuid": .lastKnownAccountUuid
        } | with_entries(select(.value != null))' \
-       "$app/config.json" > "$dir/config-oauth.json.new" 2>/dev/null; then
-      chmod 600 "$dir/config-oauth.json.new" && mv "$dir/config-oauth.json.new" "$dir/config-oauth.json"
-    else
-      rm -f "$dir/config-oauth.json.new"
+       "$app/config.json" > "$stage/config-oauth.json" 2>/dev/null || \
+       ! chmod 600 "$stage/config-oauth.json"; then
+      rm -rf "$stage"
       return 1
     fi
   fi
+
+  # Rotate the complete directory only after every artifact is ready. An empty
+  # stage deliberately replaces a stale logged-in stash after the user logs out.
+  if [[ -e "$dir" ]]; then
+    old="${stage}.old"
+    mv "$dir" "$old" || { rm -rf "$stage"; return 1; }
+  fi
+  if ! mv "$stage" "$dir"; then
+    [[ -n "$old" ]] && mv "$old" "$dir"
+    rm -rf "$stage"
+    return 1
+  fi
+  [[ -n "$old" ]] && rm -rf "$old"
   return 0
 }
 
@@ -412,26 +427,84 @@ _cb_desktop_backup() {
 # is stashed (mirrors the CLI "launching login" path). Stale Cookies-journal is
 # always removed so it can't replay against a swapped DB.
 _cb_desktop_restore() {
-  local name="$1" app dir
+  local name="$1" app dir cookie_tmp="" config_tmp="" cookie_rollback="" had_live_cookie=0
   app=$(_cb_desktop_app_dir)
   dir="$(_cb_desktop_stash_root)/$name"
   if [[ -f "$dir/Cookies" ]]; then
-    if ! { cp "$dir/Cookies" "$app/Cookies.new" && cmp -s "$dir/Cookies" "$app/Cookies.new" && \
-           chmod 600 "$app/Cookies.new" && mv "$app/Cookies.new" "$app/Cookies"; }; then
-      rm -f "$app/Cookies.new"
+    cookie_tmp=$(mktemp "$app/.Cookies.new.XXXXXX") || return 1
+    if ! { cp "$dir/Cookies" "$cookie_tmp" && cmp -s "$dir/Cookies" "$cookie_tmp" && \
+           chmod 600 "$cookie_tmp"; }; then
+      rm -f "$cookie_tmp"
       return 1
     fi
-    rm -f "$app/Cookies-journal" "$dir/Cookies"
+
+    # Prepare the metadata update before touching the live cookie DB. This
+    # keeps a corrupt or unreadable stash from producing a partial login swap.
     if [[ -s "$dir/config-oauth.json" ]]; then
+      config_tmp=$(mktemp "$app/.config.json.new.XXXXXX") || { rm -f "$cookie_tmp"; return 1; }
       # shellcheck disable=SC2016  # $meta is a jq variable, not shell
-      _cb_settings_update "$app/config.json" '. + $meta[0]' --slurpfile meta "$dir/config-oauth.json" && \
-        rm -f "$dir/config-oauth.json"
+      if [[ -f "$app/config.json" ]]; then
+        if ! jq --slurpfile meta "$dir/config-oauth.json" '. + $meta[0]' \
+             "$app/config.json" > "$config_tmp" 2>/dev/null; then
+          rm -f "$cookie_tmp" "$config_tmp"
+          return 1
+        fi
+      else
+        if ! jq -n --slurpfile meta "$dir/config-oauth.json" '$meta[0]' \
+             > "$config_tmp" 2>/dev/null; then
+          rm -f "$cookie_tmp" "$config_tmp"
+          return 1
+        fi
+      fi
+      if ! chmod 600 "$config_tmp"; then
+        rm -f "$cookie_tmp" "$config_tmp"
+        return 1
+      fi
     fi
+
+    # Keep a rollback copy until every prepared artifact is committed.
+    if [[ -f "$app/Cookies" ]]; then
+      had_live_cookie=1
+      cookie_rollback=$(mktemp "$app/.Cookies.rollback.XXXXXX") || {
+        rm -f "$cookie_tmp" "$config_tmp"
+        return 1
+      }
+      cp "$app/Cookies" "$cookie_rollback" || {
+        rm -f "$cookie_tmp" "$config_tmp" "$cookie_rollback"
+        return 1
+      }
+    fi
+    if ! mv "$cookie_tmp" "$app/Cookies"; then
+      rm -f "$cookie_tmp" "$config_tmp" "$cookie_rollback"
+      return 1
+    fi
+    if [[ -n "$config_tmp" ]]; then
+      cp "$app/config.json" "$app/config.json.bak" 2>/dev/null || true
+      if ! mv "$config_tmp" "$app/config.json"; then
+        if [[ "$had_live_cookie" -eq 1 ]]; then
+          mv "$cookie_rollback" "$app/Cookies"
+        else
+          rm -f "$app/Cookies"
+        fi
+        rm -f "$config_tmp" "$cookie_rollback"
+        return 1
+      fi
+    fi
+    rm -f "$cookie_rollback" "$app/Cookies-journal"
+    rm -f "$dir/Cookies" "$dir/config-oauth.json"
     echo "Desktop app: restored Claude.app login for '$name'"
   else
+    if [[ -f "$app/config.json" ]]; then
+      config_tmp=$(mktemp "$app/.config.json.new.XXXXXX") || return 1
+      if ! jq 'del(.["oauth:tokenCache"], .["oauth:tokenCacheV2"], .lastKnownAccountUuid)' \
+           "$app/config.json" > "$config_tmp" || ! chmod 600 "$config_tmp"; then
+        rm -f "$config_tmp"
+        return 1
+      fi
+      cp "$app/config.json" "$app/config.json.bak" 2>/dev/null || true
+      mv "$config_tmp" "$app/config.json" || { rm -f "$config_tmp"; return 1; }
+    fi
     rm -f "$app/Cookies" "$app/Cookies-journal"
-    [[ -f "$app/config.json" ]] && _cb_settings_update "$app/config.json" \
-      'del(.["oauth:tokenCache"], .["oauth:tokenCacheV2"], .lastKnownAccountUuid)'
     echo "Desktop app: no saved login for '$name' — sign in when you next open Claude.app"
   fi
   return 0
@@ -484,7 +557,7 @@ claude_billing() {
   local settings="$HOME/.claude/settings.json"
   local conf="$HOME/.claude-billing.conf"
 
-  case "$1" in
+  case "${1:-}" in
     api)
       [[ ! -f "$settings" ]] && { echo "claude-billing: ~/.claude/settings.json not found — is Claude Code installed?"; return 1; }
       local key
@@ -715,6 +788,10 @@ claude_billing() {
       aws_profile=$(_cb_conf_get "$conf"  CLAUDE_BILLING_AWS_PROFILE)
       if [[ -z "$region" || -z "$sonnet" || -z "$opus" || -z "$haiku" ]]; then
         echo "claude-billing: Bedrock config is incomplete — run: claude-billing config"
+        return 1
+      fi
+      if [[ "$profile_mode" == "explicit" && -z "$aws_profile" ]]; then
+        echo "claude-billing: explicit AWS profile is empty — run: claude-billing config"
         return 1
       fi
       # shellcheck disable=SC2016  # $region/$sonnet/etc. are jq variables, not shell
@@ -948,6 +1025,10 @@ _claude_billing_configure() {
     fi
     _cb_read -r aws_profile
     aws_profile="${aws_profile:-$saved_aws_profile}"
+    if [[ -z "$aws_profile" ]]; then
+      echo "claude-billing: AWS profile name is required in explicit mode" >&2
+      return 1
+    fi
     echo ""
     printf "Configure credentials for this profile now? [y/N]: "
     _cb_read -r setup_creds
