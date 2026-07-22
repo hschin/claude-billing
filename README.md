@@ -31,6 +31,8 @@ AWS CLI is only required for Bedrock.
 curl -fsSL https://raw.githubusercontent.com/hschin/claude-billing/main/install.sh | bash
 ```
 
+Re-running the installer updates the installed script atomically. If the download is interrupted or the downloaded script fails validation, the existing installation is left unchanged.
+
 Then reload your shell:
 
 ```sh
@@ -196,6 +198,7 @@ The state file is only a cache — if you hand-edit `~/.claude/settings.json`, r
 - Backs up and restores your claude.ai OAuth token to/from the credential store so you don't need to re-login when switching back to your subscription
 - Named subscription accounts each get their own token slot in the credential store; a small registry file (`~/.claude-billing-accounts`) tracks which account owns the live token
 - Bedrock model IDs are fetched live from `aws bedrock list-foundation-models` during setup so they're always valid for your region
+- For API, Bedrock, and account-less subscription switches, a failed OAuth backup, restore, or login returns an error and restores the previous Claude Code settings
 
 ## Credential storage
 
@@ -239,7 +242,9 @@ Switching from explicit back to inherit removes `AWS_PROFILE` from `~/.claude/se
 claude-billing uninstall
 ```
 
-Removes `~/.claude-billing/`, `~/.claude-billing.conf`, `~/.claude-billing-accounts`, and the source line from your shell RC file, and offers to delete stored secrets. Open a new shell to complete removal.
+Removes `~/.claude-billing/`, `~/.claude-billing.conf`, `~/.claude-billing-accounts`, and the exact source line from your shell RC file, and offers to delete stored secrets. Open a new shell to complete removal.
+
+If the credential store rejects a requested secret deletion, uninstall finishes local cleanup but returns an error and identifies which credentials may remain. Resolve the credential-store issue and remove those entries manually using the service names below.
 
 ## Support boundaries
 
@@ -276,7 +281,7 @@ On Windows (Git Bash), secrets are stored in `~/.claude-billing-credentials` wit
 
 **Recovering from a bad switch:**
 
-If a switch leaves Claude Code in a broken state, restore the previous settings:
+Those handled transition failures automatically restore the previous settings and return a non-zero status. If an unexpected interruption still leaves Claude Code in a broken state, restore the backup manually:
 ```sh
 cp ~/.claude/settings.json.bak ~/.claude/settings.json
 ```

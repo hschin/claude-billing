@@ -18,16 +18,20 @@ Shell utility (sourced, not executed — must work in bash AND zsh) that switche
 - Bedrock config: `~/.claude-billing.conf` (region, model IDs incl. Fable, AWS profile mode).
 - Desktop app (Claude.app, macOS): login = `Cookies` SQLite (sessionKey, values encrypted by per-machine "Claude Safe Storage" keychain key — swappable between accounts) + `oauth:tokenCache`/`oauth:tokenCacheV2`/`lastKnownAccountUuid` in the app's `config.json`. Stashed per account in `~/.claude-billing/desktop/<name>/`; owner tracked in `desktop/.active`, fully independent of `CLAUDE_BILLING_ACTIVE` (v1.2.0+): the desktop only ever holds a subscription login, so it's switched ONLY by the explicit `desktop <name>` command — CLI billing switches never touch it (`subscription` prints a hint when desktop owner differs). First `desktop` switch prompts for who owns the live login (seeds `.active`); unknown owner → safety copy in `desktop/.unclaimed`. App must be quit before swap (Chromium rewrites cookies on exit); `_cb_desktop_quit` prompts + osascript. All desktop failures warn but never fail the switch.
 - Prompt indicator: every switch writes the mode (`sub`, `sub:<name>`, `api`, `bedrock`) to `~/.claude-billing-mode`; `claude_billing_prompt` prints it for shell prompts, and `status` resyncs the file from settings.json (source of truth). User's machine wires it via a `[custom.claude_billing]` module in `~/.config/starship.toml` and a billing segment in `~/.claude/statusline-command.sh` (both user-local, not in repo).
+- Installer updates are atomic: download and syntax validation happen in a same-directory temporary file, and the existing installed script is replaced only after validation succeeds.
+- API, Bedrock, and legacy subscription switches restore the prior settings backup when OAuth backup, restore, or login fails. Do not write the mode cache or print success until the full transition succeeds.
 
 ## Gotchas
 
 - zsh does NOT word-split unquoted variables — iterate lists via `$(command substitution)` (zsh splits those). This bit us once.
 - Guard positional params with `${2:-}` (users may have `set -u`).
 - Store-before-delete ordering for all token moves — never delete a token until its copy is confirmed written.
+- Credential deletion failures must remain visible and retryable: keep account registration when removal fails, and return a warning status from uninstall when secrets may remain.
+- Match installer blocks and legacy source lines exactly when editing shell RC files; unrelated mentions of `claude-billing` belong to the user.
 - `_cb_read` reads from `/dev/tty` when readable (curl-pipe installs).
 - macOS `security add-generic-password -w` exposes value briefly in ps; no stdin option exists.
 
 ## Testing
 
-- `shellcheck -s bash claude_billing.sh` (CI runs this) + `bash -n` / `zsh -n`
-- Functional testing: source script with fake `$HOME`, force `_CB_PLATFORM="windows"` (file-based cred store), stub `claude()` and `_cb_read()`. Run tests in BOTH bash and zsh.
+- Static checks: `bash -n claude_billing.sh install.sh test/run.sh`, `zsh -n claude_billing.sh install.sh test/run.sh`, and `shellcheck claude_billing.sh install.sh test/run.sh`.
+- Behavioral suite: run both `bash test/run.sh` and `zsh test/run.sh`. Tests use isolated fake home directories and the Windows file-backed credential store so credential failures can be exercised without touching real secrets.
