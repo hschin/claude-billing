@@ -34,6 +34,29 @@ final class BillingStateTests: XCTestCase {
         )
     }
 
+    func testDesktopActionsRequireConfirmation() {
+        XCTAssertTrue(BillingAction.desktop(account: "personal").requiresConfirmation)
+        XCTAssertFalse(BillingAction.api.requiresConfirmation)
+        XCTAssertFalse(BillingAction.bedrock.requiresConfirmation)
+        XCTAssertFalse(BillingAction.subscription(account: "work").requiresConfirmation)
+    }
+
+    func testActionsDescribeProgressAndFailureSpecifically() {
+        XCTAssertEqual(
+            BillingAction.desktop(account: "personal").progressDescription,
+            "Switching Claude Desktop to personal"
+        )
+        XCTAssertEqual(BillingAction.bedrock.errorTitle, "Couldn’t Switch to AWS Bedrock")
+    }
+
+    func testConciseMenuMessageUsesOneTruncatedLine() {
+        XCTAssertEqual(
+            conciseMenuMessage("A detailed first line that is too long\nsecond line", limit: 20),
+            "A detailed first li…"
+        )
+        XCTAssertEqual(conciseMenuMessage("\n"), "No additional details were provided.")
+    }
+
     func testDesktopStateDecodesSeparatelyFromBillingState() throws {
         let data = Data(#"{"mode":"api","kind":"api","account":null,"awsProfile":null,"accounts":["work","personal"],"desktop":{"available":true,"account":"personal"}}"#.utf8)
 

@@ -64,6 +64,48 @@ enum BillingAction: Equatable {
             return ["desktop", account]
         }
     }
+
+    var progressDescription: String {
+        switch self {
+        case let .subscription(account):
+            return "Switching to Subscription · \(account ?? "Default")"
+        case .api:
+            return "Switching to Anthropic API"
+        case .bedrock:
+            return "Switching to AWS Bedrock"
+        case let .desktop(account):
+            return "Switching Claude Desktop to \(account)"
+        }
+    }
+
+    var errorTitle: String {
+        switch self {
+        case .subscription:
+            return "Couldn’t Switch Subscription"
+        case .api:
+            return "Couldn’t Switch to Anthropic API"
+        case .bedrock:
+            return "Couldn’t Switch to AWS Bedrock"
+        case .desktop:
+            return "Couldn’t Switch Claude Desktop"
+        }
+    }
+
+    var requiresConfirmation: Bool {
+        if case .desktop = self { return true }
+        return false
+    }
+}
+
+func conciseMenuMessage(_ message: String, limit: Int = 96) -> String {
+    let singleLine = message
+        .split(whereSeparator: \Character.isNewline)
+        .first
+        .map(String.init)?
+        .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    let fallback = singleLine.isEmpty ? "No additional details were provided." : singleLine
+    guard fallback.count > limit else { return fallback }
+    return String(fallback.prefix(max(1, limit - 1))) + "…"
 }
 
 private struct CommandResult {
@@ -166,6 +208,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     private var currentState: BillingState?
     private var isSwitching = false
     private var refreshTimer: Timer?
+    private var progressIndicator: NSProgressIndicator?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -183,6 +226,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func refreshState(showError: Bool) {
+        guard !isSwitching else { return }
         client.loadState { [weak self] result in
             DispatchQueue.main.async {
                 guard let self else { return }
@@ -211,9 +255,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             errorItem.image = menuImage(named: "exclamationmark.triangle.fill", description: "Error")
             errorItem.isEnabled = false
             menu.addItem(errorItem)
-            let detailItem = NSMenuItem(title: errorMessage, action: nil, keyEquivalent: "")
+            let detailItem = NSMenuItem(title: conciseMenuMessage(errorMessage), action: nil, keyEquivalent: "")
             detailItem.isEnabled = false
-            detailItem.indentationLevel = 1
             menu.addItem(detailItem)
             menu.addItem(.separator())
         } else if let currentState {
@@ -243,6 +286,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
 
+            menu.addItem(.separator())
             menu.addItem(sectionItem(title: "Other billing"))
             menu.addItem(actionItem(
                 title: "Anthropic API",
@@ -275,7 +319,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 
                 if currentState.accounts.isEmpty {
                     let emptyItem = NSMenuItem(title: "Register subscription accounts from the CLI first", action: nil, keyEquivalent: "")
-                    emptyItem.indentationLevel = 1
                     emptyItem.isEnabled = false
                     menu.addItem(emptyItem)
                 } else {
@@ -318,10 +361,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         symbolName: String
     ) -> NSMenuItem {
         let item = NSMenuItem(title: title, action: #selector(switchClicked(_:)), keyEquivalent: "")
+        if action.requiresConfirmation {
+            item.title += "…"
+        }
         item.target = self
         item.representedObject = action
         item.image = menuImage(named: symbolName, description: title)
-        item.indentationLevel = 1
         item.state = isCurrent ? .on : .off
         item.isEnabled = !isCurrent && !isSwitching
         return item
@@ -333,7 +378,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         isSwitching = true
-        statusItem.button?.toolTip = "Claude Billing — Switching…"
+        setSwitchingIndicator(description: "Claude Billing — \(action.progressDescription)…")
         rebuildMenu()
 
         client.perform(action) { [weak self] result in
@@ -344,7 +389,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
                 case .success:
                     self.refreshState(showError: true)
                 case let .failure(error):
-                    self.showError(error)
+                    self.showError(error, title: action.errorTitle)
                     self.refreshState(showError: false)
                 }
             }
@@ -359,11 +404,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.terminate(nil)
     }
 
-    private func showError(_ error: Error) {
+    private func showError(_ error: Error, title: String = "Couldn’t Load Billing Status") {
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "Claude Billing"
+        alert.messageText = title
         alert.informativeText = error.localizedDescription
         alert.runModal()
     }
@@ -385,12 +430,43 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func setStatusIcon(letter: String, description: String) {
         guard let button = statusItem.button else { return }
+        removeProgressIndicator()
         button.title = ""
         button.image = letterBadgeImage(letter: letter)
         button.imagePosition = .imageOnly
         button.imageScaling = .scaleNone
         button.toolTip = description
         button.setAccessibilityLabel(description)
+    }
+
+    private func setSwitchingIndicator(description: String) {
+        guard let button = statusItem.button else { return }
+        removeProgressIndicator()
+        button.title = ""
+        button.image = nil
+        button.toolTip = description
+        button.setAccessibilityLabel(description)
+
+        let indicator = NSProgressIndicator()
+        indicator.style = .spinning
+        indicator.controlSize = .small
+        indicator.isIndeterminate = true
+        indicator.translatesAutoresizingMaskIntoConstraints = false
+        button.addSubview(indicator)
+        NSLayoutConstraint.activate([
+            indicator.centerXAnchor.constraint(equalTo: button.centerXAnchor),
+            indicator.centerYAnchor.constraint(equalTo: button.centerYAnchor),
+            indicator.widthAnchor.constraint(equalToConstant: 14),
+            indicator.heightAnchor.constraint(equalToConstant: 14),
+        ])
+        indicator.startAnimation(nil)
+        progressIndicator = indicator
+    }
+
+    private func removeProgressIndicator() {
+        progressIndicator?.stopAnimation(nil)
+        progressIndicator?.removeFromSuperview()
+        progressIndicator = nil
     }
 
     private func letterBadgeImage(letter: String) -> NSImage {
