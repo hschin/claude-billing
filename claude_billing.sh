@@ -808,7 +808,7 @@ claude_billing() {
     bedrock)
       [[ ! -f "$conf" ]] && { echo "claude-billing: no config found. Run: claude-billing config"; return 1; }
       [[ ! -f "$settings" ]] && { echo "claude-billing: ~/.claude/settings.json not found — is Claude Code installed?"; return 1; }
-      local region sonnet opus haiku fable profile_mode aws_profile
+      local region sonnet opus haiku fable profile_mode aws_profile mode_profile
       region=$(_cb_conf_get "$conf" CLAUDE_BILLING_REGION)
       sonnet=$(_cb_conf_get "$conf" CLAUDE_BILLING_SONNET)
       opus=$(_cb_conf_get "$conf"   CLAUDE_BILLING_OPUS)
@@ -849,19 +849,57 @@ claude_billing() {
         _cb_settings_rollback "$settings"
         return 1
       fi
-      _cb_mode_set "bedrock"
+      if [[ "$profile_mode" == "explicit" ]]; then
+        mode_profile="$aws_profile"
+      else
+        mode_profile="${AWS_PROFILE:-default}"
+      fi
+      _cb_mode_set "bedrock:$mode_profile"
       echo "Switched to AWS Bedrock (region: $region) — restart Claude Code to apply"
       ;;
 
     status)
       [[ ! -f "$settings" ]] && { echo "claude-billing: ~/.claude/settings.json not found — is Claude Code installed?"; return 1; }
       _cb_require_cmd jq "install with: brew install jq / apt install jq / winget install jqlang.jq" || return 1
-      jq -r --arg active "$(_cb_active_get)" '
+      local inherited_profile="${AWS_PROFILE:-default}"
+      local json_status mode
+      json_status=$(jq -c \
+        --arg accounts "$(_cb_accounts_list)" \
+        --arg active "$(_cb_active_get)" \
+        --arg inherited_profile "$inherited_profile" '
+        .env as $e |
+        if ($e.CLAUDE_CODE_USE_BEDROCK // "") != "" then
+          ($e.AWS_PROFILE // "") as $profile |
+          {
+            mode: "bedrock:\(if $profile != "" then $profile else $inherited_profile end)",
+            kind: "bedrock",
+            account: null,
+            awsProfile: (if $profile != "" then $profile else $inherited_profile end)
+          }
+        elif ($e.ANTHROPIC_API_KEY // "") != "" then
+          {mode: "api", kind: "api", account: null, awsProfile: null}
+        else
+          {
+            mode: (if $active != "" then "sub:\($active)" else "sub" end),
+            kind: "subscription",
+            account: (if $active != "" then $active else null end),
+            awsProfile: null
+          }
+        end |
+        . + {accounts: ($accounts | split(" ") | map(select(length > 0)))}' \
+        "$settings") || return 1
+      mode=$(printf '%s' "$json_status" | jq -r '.mode')
+      [[ -n "$mode" ]] && _cb_mode_set "$mode"
+      if [[ "${2:-}" == "--json" ]]; then
+        printf '%s\n' "$json_status"
+        return 0
+      fi
+      jq -r --arg active "$(_cb_active_get)" --arg inherited_profile "$inherited_profile" '
         .env as $e |
         if ($e.CLAUDE_CODE_USE_BEDROCK // "") != "" then
           "Current: AWS Bedrock",
           "  Region:  \($e.AWS_REGION // "not set")",
-          "  Profile: \(if ($e.AWS_PROFILE // "") != "" then $e.AWS_PROFILE else "inherited/default" end)",
+          "  Profile: \(if ($e.AWS_PROFILE // "") != "" then $e.AWS_PROFILE else "inherited (\($inherited_profile))" end)",
           "  Sonnet:  \($e.ANTHROPIC_DEFAULT_SONNET_MODEL // "not set")",
           "  Opus:    \($e.ANTHROPIC_DEFAULT_OPUS_MODEL // "not set")",
           "  Haiku:   \($e.ANTHROPIC_DEFAULT_HAIKU_MODEL // "not set")",
@@ -877,15 +915,34 @@ claude_billing() {
         desk_owner=$(_cb_desktop_owner_get)
         echo "Desktop (Claude.app): ${desk_owner:-unknown account}"
       fi
-      # Resync the prompt state file from settings.json (the source of truth)
-      local mode
-      mode=$(jq -r --arg active "$(_cb_active_get)" '
-        .env as $e |
-        if ($e.CLAUDE_CODE_USE_BEDROCK // "") != "" then "bedrock"
-        elif ($e.ANTHROPIC_API_KEY // "") != "" then "api"
-        elif $active != "" then "sub:\($active)"
-        else "sub" end' "$settings")
-      [[ -n "$mode" ]] && _cb_mode_set "$mode"
+      ;;
+
+    menubar)
+      if [[ "$(_cb_platform)" != "macos" ]]; then
+        echo "claude-billing: the menu bar app requires macOS" >&2
+        return 1
+      fi
+      local menubar_action="${2:-}"
+      local menubar_installer="$HOME/.claude-billing/install-menubar.sh"
+      case "$menubar_action" in
+        install|uninstall) ;;
+        *)
+          echo "Usage: claude-billing menubar <install|uninstall>"
+          return 1
+          ;;
+      esac
+      if [[ ! -f "$menubar_installer" ]]; then
+        echo "claude-billing: menu bar installer not found — update claude-billing first" >&2
+        return 1
+      fi
+      case "$menubar_action" in
+        install)
+          bash "$menubar_installer"
+          ;;
+        uninstall)
+          bash "$menubar_installer" --uninstall
+          ;;
+      esac
       ;;
 
     add-key)
@@ -926,11 +983,12 @@ claude_billing() {
       echo "                         once accounts are registered)"
       echo "  api                    Use Anthropic API key billing"
       echo "  bedrock                Use AWS Bedrock"
-      echo "  status                 Show current billing mode"
+      echo "  status [--json]        Show current billing mode"
       echo "  accounts               List registered subscription accounts"
       echo "  add-account <name>     Register a claude.ai subscription account"
       echo "  remove-account <name>  Remove an account and its stored token"
       echo "  desktop [name]         Show or switch the Claude.app desktop login (macOS)"
+      echo "  menubar <action>       Install or uninstall the menu bar app (macOS)"
       echo "  config                 Reconfigure Bedrock region, models, and AWS profile"
       echo "  add-key                Save or update your Anthropic API key"
       echo "  login                  Log in to claude.ai"
@@ -942,12 +1000,15 @@ claude_billing() {
 
 _claude_billing_uninstall() {
   local accounts_list cleanup_failed=0
+  local menubar_app="$HOME/Applications/Claude Billing.app"
+  local menubar_agent="$HOME/Library/LaunchAgents/com.hschin.claude-billing-menubar.plist"
   accounts_list=$(_cb_accounts_list)
   echo "This will remove:"
   echo "  ~/.claude-billing/          (scripts and stashed desktop app logins)"
   echo "  ~/.claude-billing.conf      (config)"
   echo "  ~/.claude-billing-accounts  (account registry)"
   echo "  ~/.claude-billing-mode      (prompt state)"
+  echo "  Claude Billing menu bar app (when installed)"
   echo "  source line from your shell RC file"
   echo ""
   printf "Continue? [y/N]: "
@@ -980,6 +1041,14 @@ _claude_billing_uninstall() {
       fi
     fi
   done
+
+  if [[ -e "$menubar_agent" ]]; then
+    if command -v launchctl >/dev/null 2>&1; then
+      launchctl bootout "gui/$(id -u)/com.hschin.claude-billing-menubar" 2>/dev/null || true
+    fi
+    rm -f "$menubar_agent"
+  fi
+  rm -rf "$menubar_app"
 
   rm -f "$HOME/.claude-billing.conf" "$HOME/.claude-billing-accounts" "$HOME/.claude-billing-mode"
   rm -rf "$HOME/.claude-billing"

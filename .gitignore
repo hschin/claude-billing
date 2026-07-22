@@ -1,3 +1,4 @@
 .claude/
 *.bak
 test/tmp/
+menubar/.build/

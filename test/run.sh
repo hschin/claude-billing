@@ -376,6 +376,224 @@ uninstall_reports_failed_secret_deletion() (
   esac
 )
 
+bedrock_explicit_profile_is_shown_in_the_mode_indicator() (
+  HOME="$TEST_ROOT/bedrock-explicit-indicator"
+  export HOME
+  # shellcheck source=../claude_billing.sh
+  . "$SCRIPT"
+  _CB_PLATFORM="windows"
+
+  mkdir -p "$HOME/.claude"
+  printf '%s' '{"env":{}}' > "$HOME/.claude/settings.json"
+  {
+    printf '%s\n' 'CLAUDE_BILLING_REGION="us-east-1"'
+    printf '%s\n' 'CLAUDE_BILLING_SONNET="sonnet"'
+    printf '%s\n' 'CLAUDE_BILLING_OPUS="opus"'
+    printf '%s\n' 'CLAUDE_BILLING_HAIKU="haiku"'
+    printf '%s\n' 'CLAUDE_BILLING_FABLE=""'
+    printf '%s\n' 'CLAUDE_BILLING_AWS_PROFILE_MODE="explicit"'
+    printf '%s\n' 'CLAUDE_BILLING_AWS_PROFILE="work-aws"'
+  } > "$HOME/.claude-billing.conf"
+
+  claude_billing bedrock >/dev/null 2>&1
+
+  assert_eq "bedrock:work-aws" "$(claude_billing_prompt)" \
+    "shell prompt should include the explicit AWS profile" || return 1
+  assert_eq "bedrock:work-aws" "$(cat "$HOME/.claude-billing-mode")" \
+    "statusline cache should include the explicit AWS profile"
+)
+
+status_resync_uses_the_inherited_bedrock_profile() (
+  HOME="$TEST_ROOT/bedrock-inherited-indicator"
+  AWS_PROFILE="team-aws"
+  export HOME AWS_PROFILE
+  # shellcheck source=../claude_billing.sh
+  . "$SCRIPT"
+
+  mkdir -p "$HOME/.claude"
+  printf '%s' \
+    '{"env":{"CLAUDE_CODE_USE_BEDROCK":"1","AWS_REGION":"us-east-1"}}' \
+    > "$HOME/.claude/settings.json"
+
+  claude_billing status >/dev/null 2>&1
+
+  assert_eq "bedrock:team-aws" "$(claude_billing_prompt)" \
+    "status resync should include the inherited AWS profile"
+)
+
+json_status_exposes_menu_bar_state() (
+  HOME="$TEST_ROOT/json-status"
+  export HOME
+  # shellcheck source=../claude_billing.sh
+  . "$SCRIPT"
+
+  mkdir -p "$HOME/.claude"
+  printf '%s' \
+    '{"env":{"CLAUDE_CODE_USE_BEDROCK":"1","AWS_REGION":"us-east-1","AWS_PROFILE":"work-aws"}}' \
+    > "$HOME/.claude/settings.json"
+  _cb_accounts_write "work personal" "work"
+
+  output=$(claude_billing status --json)
+
+  assert_eq "bedrock:work-aws" "$(printf '%s' "$output" | jq -r '.mode')" \
+    "JSON status should expose the effective billing mode" || return 1
+  assert_eq 'work,personal' "$(printf '%s' "$output" | jq -r '.accounts | join(",")')" \
+    "JSON status should expose registered accounts"
+)
+
+menubar_installer_creates_an_app_and_launch_agent() (
+  home="$TEST_ROOT/menubar-installer"
+  bin="$home/bin"
+  app="$home/Applications/Claude Billing.app"
+  agent="$home/Library/LaunchAgents/com.hschin.claude-billing-menubar.plist"
+  mkdir -p "$bin" "$home/.claude-billing"
+  printf '%s\n' '# installed test fixture' > "$home/.claude-billing/claude_billing.sh"
+
+  printf '%s\n' '#!/bin/sh' 'printf Darwin' > "$bin/uname"
+  {
+    printf '%s\n' '#!/bin/sh'
+    printf '%s\n' 'output=""'
+    printf '%s\n' 'while [ "$#" -gt 0 ]; do'
+    printf '%s\n' '  if [ "$1" = "-o" ]; then shift; output=$1; fi'
+    printf '%s\n' '  shift'
+    printf '%s\n' 'done'
+    printf '%s\n' 'printf "#!/bin/sh\\n" > "$output"'
+    printf '%s\n' 'chmod +x "$output"'
+  } > "$bin/swiftc"
+  printf '%s\n' '#!/bin/sh' 'exit 0' > "$bin/launchctl"
+  chmod +x "$bin/uname" "$bin/swiftc" "$bin/launchctl"
+
+  HOME="$home" PATH="$bin:$PATH" bash "$REPO_DIR/install-menubar.sh" >/dev/null 2>&1
+  rc=$?
+
+  assert_eq "0" "$rc" "menu bar installation should succeed" || return 1
+  [ -x "$app/Contents/MacOS/ClaudeBillingMenuBar" ] || {
+    printf '    menu bar executable was not installed\n' >&2
+    return 1
+  }
+  [ -f "$agent" ] || {
+    printf '    launch agent was not installed\n' >&2
+    return 1
+  }
+  grep -q '<key>LSUIElement</key>' "$app/Contents/Info.plist" || {
+    printf '    app is not configured as a menu-bar-only application\n' >&2
+    return 1
+  }
+)
+
+uninstall_removes_the_menu_bar_app() (
+  HOME="$TEST_ROOT/uninstall-menubar"
+  export HOME
+  # shellcheck source=../claude_billing.sh
+  . "$SCRIPT"
+  launchctl() { return 0; }
+
+  app="$HOME/Applications/Claude Billing.app"
+  agent="$HOME/Library/LaunchAgents/com.hschin.claude-billing-menubar.plist"
+  mkdir -p "$app/Contents/MacOS" "$(dirname "$agent")"
+  printf '%s' app > "$app/Contents/MacOS/ClaudeBillingMenuBar"
+  printf '%s' agent > "$agent"
+  responses="$HOME/responses"
+  printf 'y\nn\nn\n' > "$responses"
+  exec 3< "$responses"
+  # shellcheck disable=SC2162  # callers pass -r through "$@"
+  _cb_read() { read "$@" <&3; }
+
+  claude_billing uninstall >/dev/null 2>&1
+  rc=$?
+  exec 3<&-
+
+  assert_eq "0" "$rc" "uninstall should succeed" || return 1
+  [ ! -e "$app" ] || {
+    printf '    menu bar app was not removed\n' >&2
+    return 1
+  }
+  [ ! -e "$agent" ] || {
+    printf '    menu bar launch agent was not removed\n' >&2
+    return 1
+  }
+)
+
+menubar_install_command_runs_the_installed_helper() (
+  HOME="$TEST_ROOT/menubar-command-install"
+  export HOME
+  # shellcheck source=../claude_billing.sh
+  . "$SCRIPT"
+  _CB_PLATFORM="macos"
+
+  mkdir -p "$HOME/.claude-billing"
+  {
+    printf '%s\n' '#!/bin/sh'
+    printf '%s\n' 'printf install > "$HOME/menubar-command"'
+  } > "$HOME/.claude-billing/install-menubar.sh"
+
+  claude_billing menubar install >/dev/null 2>&1
+  rc=$?
+
+  assert_eq "0" "$rc" "menu bar install command should succeed" || return 1
+  assert_eq "install" "$(cat "$HOME/menubar-command" 2>/dev/null)" \
+    "menu bar install command should run the installed helper"
+)
+
+menubar_uninstall_command_passes_the_uninstall_flag() (
+  HOME="$TEST_ROOT/menubar-command-uninstall"
+  export HOME
+  # shellcheck source=../claude_billing.sh
+  . "$SCRIPT"
+  _CB_PLATFORM="macos"
+
+  mkdir -p "$HOME/.claude-billing"
+  {
+    printf '%s\n' '#!/bin/sh'
+    printf '%s\n' 'printf "%s" "$1" > "$HOME/menubar-command"'
+  } > "$HOME/.claude-billing/install-menubar.sh"
+
+  claude_billing menubar uninstall >/dev/null 2>&1
+  rc=$?
+
+  assert_eq "0" "$rc" "menu bar uninstall command should succeed" || return 1
+  assert_eq "--uninstall" "$(cat "$HOME/menubar-command" 2>/dev/null)" \
+    "menu bar uninstall command should pass the standalone uninstall flag"
+)
+
+installer_downloads_the_menubar_helper_on_macos() (
+  home="$TEST_ROOT/installer-menubar-helper"
+  bin="$home/bin"
+  mkdir -p "$bin"
+
+  {
+    printf '%s\n' '#!/bin/sh'
+    printf '%s\n' 'out=""'
+    printf '%s\n' 'url=""'
+    printf '%s\n' 'while [ "$#" -gt 0 ]; do'
+    printf '%s\n' '  if [ "$1" = "-o" ]; then shift; out=$1; else url=$1; fi'
+    printf '%s\n' '  shift'
+    printf '%s\n' 'done'
+    printf '%s\n' 'case "$url" in'
+    printf '  */claude_billing.sh) cp %s/claude_billing.sh "$out"; printf '\''\\n_cb_read() { read "$@"; }\\n'\'' >> "$out" ;;\n' "$REPO_DIR"
+    printf '  */install-menubar.sh) cp %s/install-menubar.sh "$out" ;;\n' "$REPO_DIR"
+    printf '%s\n' '  *) exit 22 ;;'
+    printf '%s\n' 'esac'
+  } > "$bin/curl"
+  printf '%s\n' '#!/bin/sh' 'printf Darwin' > "$bin/uname"
+  printf '%s\n' '#!/bin/sh' 'exit 1' > "$bin/security"
+  printf '%s\n' '#!/bin/sh' 'exit 0' > "$bin/claude"
+  chmod +x "$bin/curl" "$bin/uname" "$bin/security" "$bin/claude"
+
+  printf 'n\nn\nn\n' | HOME="$home" SHELL=/bin/bash PATH="$bin:$PATH" \
+    bash "$REPO_DIR/install.sh" > "$home/install-output" 2>&1
+  rc=$?
+
+  if ! assert_eq "0" "$rc" "macOS installation should succeed"; then
+    sed 's/^/    /' "$home/install-output" >&2
+    return 1
+  fi
+  [ -x "$home/.claude-billing/install-menubar.sh" ] || {
+    printf '    menu bar helper was not installed\n' >&2
+    return 1
+  }
+)
+
 run_test "failed desktop restore preserves live and stashed sessions" \
   desktop_restore_failure_preserves_both_sessions
 run_test "desktop backup replaces a stale logged-in session" \
@@ -402,6 +620,22 @@ run_test "remove-account keeps registration when secret deletion fails" \
   remove_account_keeps_registration_when_secret_deletion_fails
 run_test "uninstall reports failed secret deletion" \
   uninstall_reports_failed_secret_deletion
+run_test "Bedrock explicit profile is shown in the mode indicator" \
+  bedrock_explicit_profile_is_shown_in_the_mode_indicator
+run_test "status resync uses the inherited Bedrock profile" \
+  status_resync_uses_the_inherited_bedrock_profile
+run_test "JSON status exposes menu bar state" \
+  json_status_exposes_menu_bar_state
+run_test "menu bar installer creates an app and launch agent" \
+  menubar_installer_creates_an_app_and_launch_agent
+run_test "uninstall removes the menu bar app" \
+  uninstall_removes_the_menu_bar_app
+run_test "menu bar install command runs the installed helper" \
+  menubar_install_command_runs_the_installed_helper
+run_test "menu bar uninstall command passes the uninstall flag" \
+  menubar_uninstall_command_passes_the_uninstall_flag
+run_test "installer downloads the menu bar helper on macOS" \
+  installer_downloads_the_menubar_helper_on_macos
 
 if [ "$failures" -ne 0 ]; then
   printf '%s test(s) failed\n' "$failures" >&2

@@ -89,6 +89,21 @@ else
   exit 1
 fi
 
+if [[ "$PLATFORM" == "macos" ]]; then
+  MENUBAR_INSTALLER="$INSTALL_DIR/install-menubar.sh"
+  MENUBAR_TMP=$(mktemp "$INSTALL_DIR/.install-menubar.sh.XXXXXX")
+  echo "Downloading menu bar installer..."
+  if curl -fsSL "$REPO_URL/install-menubar.sh" -o "$MENUBAR_TMP" && \
+     [[ -s "$MENUBAR_TMP" ]] && bash -n "$MENUBAR_TMP" && \
+     chmod 755 "$MENUBAR_TMP" && mv "$MENUBAR_TMP" "$MENUBAR_INSTALLER"; then
+    :
+  else
+    rm -f "$MENUBAR_TMP"
+    echo "Error: failed to download the menu bar installer." >&2
+    exit 1
+  fi
+fi
+
 # Add source block to shell rc (marker comments allow precise removal on uninstall)
 RC_FILE=$(detect_shell_rc)
 
@@ -170,3 +185,9 @@ echo "  claude-billing add-account <name>  # register a subscription account for
 echo "  claude-billing config              # reconfigure Bedrock models"
 echo "  claude-billing add-key             # save or update your Anthropic API key"
 echo "  claude-billing login               # log in to claude.ai"
+
+if [[ "$PLATFORM" == "macos" ]]; then
+  echo ""
+  echo "Optional macOS menu bar app:"
+  echo "  claude-billing menubar install"
+fi

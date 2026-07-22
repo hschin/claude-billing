@@ -99,10 +99,13 @@ claude-billing subscription          # switch to claude.ai subscription (Pro, Ma
 claude-billing api                   # switch to Anthropic API billing
 claude-billing bedrock               # switch to AWS Bedrock
 claude-billing status                # show current mode
+claude-billing status --json         # machine-readable mode and account state
 claude-billing accounts              # list registered subscription accounts
 claude-billing add-account <name>    # register a claude.ai subscription account
 claude-billing remove-account <name> # remove an account and its stored token
 claude-billing desktop [name]        # show or switch the Claude.app desktop login (macOS)
+claude-billing menubar install       # install the native menu bar app (macOS)
+claude-billing menubar uninstall     # remove the native menu bar app (macOS)
 claude-billing config                # reconfigure Bedrock region, models, and AWS profile
 claude-billing add-key               # save or update your Anthropic API key
 claude-billing login                 # log in to claude.ai
@@ -110,6 +113,28 @@ claude-billing uninstall             # remove claude-billing
 ```
 
 Restart Claude Code after switching for changes to take effect.
+
+## macOS menu bar app
+
+The optional native menu bar app shows the current billing mode and lets you switch among registered subscription accounts, Anthropic API billing, and AWS Bedrock without opening a terminal. It requires macOS 13 or later and the Xcode Command Line Tools (`xcode-select --install`). Install or update the command-line utility first, then run:
+
+```sh
+claude-billing menubar install
+```
+
+The menu title identifies the active mode, for example `Claude · work`, `Claude · API`, or `Claude · AWS work-aws`. It refreshes automatically and has a manual **Refresh** action. A switch updates the same Claude Code settings and prompt/statusline cache as the CLI; restart Claude Code afterward to apply it.
+
+The menu can select accounts that have already been registered with `claude-billing add-account`. Account registration, API-key entry, and Bedrock configuration remain CLI operations because they require interactive or secret input. The menu changes Claude Code billing; it does not switch the separately managed Claude.app desktop login.
+
+For Bedrock, an explicit configured AWS profile is deterministic and appears in the menu title. A login item does not normally inherit a terminal's `AWS_PROFILE`, so inherited profile mode usually resolves to `default` when switched from the menu. Configure an explicit profile with `claude-billing config` if the menu should always select a particular AWS account.
+
+The app starts automatically at login. Re-run the install command to update it. Remove only the menu bar app with:
+
+```sh
+claude-billing menubar uninstall
+```
+
+`claude-billing uninstall` also removes the menu bar app when it is installed.
 
 ## Multiple subscription accounts
 
@@ -152,7 +177,9 @@ claude-billing accounts
 
 ## Prompt indicator
 
-Every switch records the resulting mode in `~/.claude-billing-mode` (`sub:work`, `api`, `bedrock`), so your shell prompt can show which billing you're on. With [Starship](https://starship.rs), add to `~/.config/starship.toml`:
+Every switch records the resulting mode in `~/.claude-billing-mode` (`sub:work`, `api`, `bedrock:work-aws`), so your shell prompt can show which billing you're on. Bedrock uses the configured explicit profile, the inherited `AWS_PROFILE`, or `default` when neither is set.
+
+With [Starship](https://starship.rs), add to `~/.config/starship.toml`:
 
 ```toml
 [custom.claude_billing]
@@ -265,6 +292,8 @@ If the credential store rejects a requested secret deletion, uninstall finishes 
 | `~/.claude-billing/claude_billing.sh` | The installed script |
 | `~/.claude-billing/desktop/<name>/` | Stashed Claude.app desktop logins (contents encrypted by Claude Safe Storage) |
 | `~/Library/Application Support/Claude/` | Desktop app profile — `Cookies` and `config.json` swapped by `desktop <name>` (macOS) |
+| `~/Applications/Claude Billing.app` | Optional native menu bar app (macOS) |
+| `~/Library/LaunchAgents/com.hschin.claude-billing-menubar.plist` | Starts the optional menu bar app at login (macOS) |
 | Your shell RC file (`.zshrc`, `.bashrc`, or `.profile`) | Source block added on install, removed on uninstall |
 
 **Secrets stored (never written to disk unencrypted except on Windows):**

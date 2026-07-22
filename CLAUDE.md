@@ -5,7 +5,9 @@ Shell utility (sourced, not executed — must work in bash AND zsh) that switche
 ## Files
 
 - `claude_billing.sh` — everything: helpers, credential abstraction, account registry, `claude_billing()` dispatcher, `claude-billing` alias
-- `install.sh` — curl-pipe installer; adds `# >>> claude-billing >>>` block to RC file
+- `install.sh` — curl-pipe installer; adds `# >>> claude-billing >>>` block to RC file and installs the menu bar helper on macOS
+- `install-menubar.sh` — optional macOS menu bar app builder, login-item installer, and standalone uninstaller
+- `menubar/` — native AppKit app plus Swift package tests
 - Installed to `~/.claude-billing/`; version in `_CB_VERSION` (bump on release, separate chore commit)
 
 ## Architecture
@@ -17,7 +19,8 @@ Shell utility (sourced, not executed — must work in bash AND zsh) that switche
 - Once accounts are registered, `subscription`/`sub` requires a name; account-less usage keeps legacy single-backup behavior (backward compat).
 - Bedrock config: `~/.claude-billing.conf` (region, model IDs incl. Fable, AWS profile mode).
 - Desktop app (Claude.app, macOS): login = `Cookies` SQLite (sessionKey, values encrypted by per-machine "Claude Safe Storage" keychain key — swappable between accounts) + `oauth:tokenCache`/`oauth:tokenCacheV2`/`lastKnownAccountUuid` in the app's `config.json`. Stashed per account in `~/.claude-billing/desktop/<name>/`; owner tracked in `desktop/.active`, fully independent of `CLAUDE_BILLING_ACTIVE` (v1.2.0+): the desktop only ever holds a subscription login, so it's switched ONLY by the explicit `desktop <name>` command — CLI billing switches never touch it (`subscription` prints a hint when desktop owner differs). First `desktop` switch prompts for who owns the live login (seeds `.active`); unknown owner → safety copy in `desktop/.unclaimed`. App must be quit before swap (Chromium rewrites cookies on exit); `_cb_desktop_quit` prompts + osascript. All desktop failures warn but never fail the switch.
-- Prompt indicator: every switch writes the mode (`sub`, `sub:<name>`, `api`, `bedrock`) to `~/.claude-billing-mode`; `claude_billing_prompt` prints it for shell prompts, and `status` resyncs the file from settings.json (source of truth). User's machine wires it via a `[custom.claude_billing]` module in `~/.config/starship.toml` and a billing segment in `~/.claude/statusline-command.sh` (both user-local, not in repo).
+- Prompt indicator: every switch writes the mode (`sub`, `sub:<name>`, `api`, `bedrock:<profile>`) to `~/.claude-billing-mode`; `claude_billing_prompt` prints it for shell prompts, and `status` resyncs the file from settings.json (source of truth). Bedrock resolves the profile from explicit settings first, then inherited `AWS_PROFILE`, then `default`. User's machine wires it via a `[custom.claude_billing]` module in `~/.config/starship.toml` and a billing segment in `~/.claude/statusline-command.sh` (both user-local, not in repo).
+- Menu bar app (macOS 13+): `menubar install|uninstall` delegates to the helper installed by the normal macOS installer. The app calls the installed shell function through `/bin/zsh` and consumes `status --json`; never duplicate settings or credential transition logic in Swift. Account names are passed as separate process arguments. It refreshes every 15 seconds and uses the same mode cache as prompts/statuslines. Login items generally do not inherit terminal-scoped `AWS_PROFILE`, so an inherited Bedrock profile normally resolves to `default`; explicit profile mode is deterministic.
 - Installer updates are atomic: download and syntax validation happen in a same-directory temporary file, and the existing installed script is replaced only after validation succeeds.
 - API, Bedrock, and legacy subscription switches restore the prior settings backup when OAuth backup, restore, or login fails. Do not write the mode cache or print success until the full transition succeeds.
 
@@ -33,5 +36,6 @@ Shell utility (sourced, not executed — must work in bash AND zsh) that switche
 
 ## Testing
 
-- Static checks: `bash -n claude_billing.sh install.sh test/run.sh`, `zsh -n claude_billing.sh install.sh test/run.sh`, and `shellcheck claude_billing.sh install.sh test/run.sh`.
+- Static checks: `bash -n claude_billing.sh install.sh install-menubar.sh test/run.sh`, `zsh -n claude_billing.sh install.sh test/run.sh`, and `shellcheck claude_billing.sh install.sh install-menubar.sh test/run.sh`.
 - Behavioral suite: run both `bash test/run.sh` and `zsh test/run.sh`. Tests use isolated fake home directories and the Windows file-backed credential store so credential failures can be exercised without touching real secrets.
+- Menu bar suite: run `swift test --package-path menubar` on macOS. The shell suite also exercises bundle and launch-agent installation with a fake toolchain.
