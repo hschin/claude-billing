@@ -53,7 +53,9 @@ desktop_restore_failure_preserves_both_sessions() (
   _cb_desktop_owner_set "work"
 
   claude_billing desktop personal >/dev/null 2>&1
+  rc=$?
 
+  assert_eq "1" "$rc" "an explicit failed desktop switch should return an error" || return 1
   assert_eq "work" "$(_cb_desktop_owner_get)" "owner must not change after a failed restore" || return 1
   assert_eq "work-session" "$(cat "$app/Cookies")" "live session must remain untouched" || return 1
   assert_eq "personal-session" "$(cat "$target/Cookies")" "target cookie stash must be preserved" || return 1
@@ -441,6 +443,25 @@ json_status_exposes_menu_bar_state() (
     "JSON status should expose registered accounts"
 )
 
+json_status_exposes_the_desktop_account() (
+  HOME="$TEST_ROOT/json-status-desktop"
+  export HOME
+  # shellcheck source=../claude_billing.sh
+  . "$SCRIPT"
+
+  mkdir -p "$HOME/.claude" "$HOME/Library/Application Support/Claude"
+  printf '%s' '{"env":{}}' > "$HOME/.claude/settings.json"
+  _cb_accounts_write "work personal" "work"
+  _cb_desktop_owner_set "personal"
+
+  output=$(claude_billing status --json)
+
+  assert_eq "true" "$(printf '%s' "$output" | jq -r '.desktop.available')" \
+    "JSON status should report Claude Desktop availability" || return 1
+  assert_eq "personal" "$(printf '%s' "$output" | jq -r '.desktop.account')" \
+    "JSON status should expose the independent Claude Desktop account"
+)
+
 menubar_installer_creates_an_app_and_launch_agent() (
   home="$TEST_ROOT/menubar-installer"
   bin="$home/bin"
@@ -626,6 +647,8 @@ run_test "status resync uses the inherited Bedrock profile" \
   status_resync_uses_the_inherited_bedrock_profile
 run_test "JSON status exposes menu bar state" \
   json_status_exposes_menu_bar_state
+run_test "JSON status exposes the Claude Desktop account" \
+  json_status_exposes_the_desktop_account
 run_test "menu bar installer creates an app and launch agent" \
   menubar_installer_creates_an_app_and_launch_agent
 run_test "uninstall removes the menu bar app" \

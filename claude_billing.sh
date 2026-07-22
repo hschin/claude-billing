@@ -803,6 +803,7 @@ claude_billing() {
         owner="$claim"
       fi
       _cb_desktop_switch "$name" "$owner"
+      [[ "$(_cb_desktop_owner_get)" == "$name" ]] || return 1
       ;;
 
     bedrock)
@@ -862,10 +863,13 @@ claude_billing() {
       [[ ! -f "$settings" ]] && { echo "claude-billing: ~/.claude/settings.json not found — is Claude Code installed?"; return 1; }
       _cb_require_cmd jq "install with: brew install jq / apt install jq / winget install jqlang.jq" || return 1
       local inherited_profile="${AWS_PROFILE:-default}"
-      local json_status mode
+      local json_status mode desktop_available="false"
+      _cb_desktop_available && desktop_available="true"
       json_status=$(jq -c \
         --arg accounts "$(_cb_accounts_list)" \
         --arg active "$(_cb_active_get)" \
+        --arg desktop_account "$(_cb_desktop_owner_get)" \
+        --arg desktop_available "$desktop_available" \
         --arg inherited_profile "$inherited_profile" '
         .env as $e |
         if ($e.CLAUDE_CODE_USE_BEDROCK // "") != "" then
@@ -886,7 +890,13 @@ claude_billing() {
             awsProfile: null
           }
         end |
-        . + {accounts: ($accounts | split(" ") | map(select(length > 0)))}' \
+        . + {
+          accounts: ($accounts | split(" ") | map(select(length > 0))),
+          desktop: {
+            available: ($desktop_available == "true"),
+            account: (if $desktop_account != "" then $desktop_account else null end)
+          }
+        }' \
         "$settings") || return 1
       mode=$(printf '%s' "$json_status" | jq -r '.mode')
       [[ -n "$mode" ]] && _cb_mode_set "$mode"

@@ -122,11 +122,11 @@ The optional native menu bar app shows the current billing mode and lets you swi
 claude-billing menubar install
 ```
 
-The menu title identifies the active mode, for example `Claude · work`, `Claude · API`, or `Claude · AWS work-aws`. It refreshes automatically and has a manual **Refresh** action. A switch updates the same Claude Code settings and prompt/statusline cache as the CLI; restart Claude Code afterward to apply it.
+The menu bar uses a compact rounded monogram for the active mode: **S** for subscription, **A** for Anthropic API, and **B** for Bedrock. Hover over it for the active account or AWS profile. The dropdown groups subscription accounts and other billing providers, marks the current choice, and includes a restart reminder. A separate **Claude Desktop** section shows and switches the desktop app's account without changing the billing badge. It refreshes automatically and has a manual **Refresh** action. A billing switch updates the same Claude Code settings and prompt/statusline cache as the CLI; restart Claude Code afterward to apply it.
 
-The menu can select accounts that have already been registered with `claude-billing add-account`. Account registration, API-key entry, and Bedrock configuration remain CLI operations because they require interactive or secret input. The menu changes Claude Code billing; it does not switch the separately managed Claude.app desktop login.
+The menu can select accounts that have already been registered with `claude-billing add-account`. Account registration, API-key entry, and Bedrock configuration remain CLI operations because they require interactive or secret input. Before changing the Claude Desktop account, the menu confirms that Claude Desktop will close so its session files can be swapped safely. If that account has no saved desktop session yet, Claude Desktop opens signed out the next time you launch it; sign in once and later switches reuse it.
 
-For Bedrock, an explicit configured AWS profile is deterministic and appears in the menu title. A login item does not normally inherit a terminal's `AWS_PROFILE`, so inherited profile mode usually resolves to `default` when switched from the menu. Configure an explicit profile with `claude-billing config` if the menu should always select a particular AWS account.
+For Bedrock, an explicit configured AWS profile is deterministic and appears in the tooltip and current-mode row. A login item does not normally inherit a terminal's `AWS_PROFILE`, so inherited profile mode usually resolves to `default` when switched from the menu. Configure an explicit profile with `claude-billing config` if the menu should always select a particular AWS account.
 
 The app starts automatically at login. Re-run the install command to update it. Remove only the menu bar app with:
 
