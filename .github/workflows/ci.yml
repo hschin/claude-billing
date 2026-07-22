@@ -14,13 +14,19 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install dependencies
-        run: sudo apt-get install -y shellcheck zsh
+        run: sudo apt-get install -y jq shellcheck zsh
 
       - name: Bash syntax check
-        run: bash -n claude_billing.sh install.sh
+        run: bash -n claude_billing.sh install.sh test/run.sh
 
       - name: Zsh syntax check
-        run: zsh -n claude_billing.sh
+        run: zsh -n claude_billing.sh install.sh test/run.sh
 
       - name: ShellCheck
-        run: shellcheck claude_billing.sh install.sh
+        run: shellcheck claude_billing.sh install.sh test/run.sh
+
+      - name: Bash behavioral tests
+        run: bash test/run.sh
+
+      - name: Zsh behavioral tests
+        run: zsh test/run.sh
