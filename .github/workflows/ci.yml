@@ -17,16 +17,25 @@ jobs:
         run: sudo apt-get install -y jq shellcheck zsh
 
       - name: Bash syntax check
-        run: bash -n claude_billing.sh install.sh test/run.sh
+        run: bash -n claude_billing.sh install.sh install-menubar.sh test/run.sh
 
       - name: Zsh syntax check
         run: zsh -n claude_billing.sh install.sh test/run.sh
 
       - name: ShellCheck
-        run: shellcheck claude_billing.sh install.sh test/run.sh
+        run: shellcheck claude_billing.sh install.sh install-menubar.sh test/run.sh
 
       - name: Bash behavioral tests
         run: bash test/run.sh
 
       - name: Zsh behavioral tests
         run: zsh test/run.sh
+
+  menubar:
+    name: macOS menu bar app
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and test Swift package
+        run: swift test --package-path menubar
