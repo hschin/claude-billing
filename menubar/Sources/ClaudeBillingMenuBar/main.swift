@@ -408,6 +408,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
         alert.alertStyle = .warning
+        alert.icon = symbolAlertIcon(named: "exclamationmark.triangle.fill", description: "Error")
         alert.messageText = title
         alert.informativeText = error.localizedDescription
         alert.runModal()
@@ -417,15 +418,33 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
         alert.alertStyle = .informational
+        alert.icon = claudeDesktopIcon()
         alert.messageText = "Switch Claude Desktop to \(account)?"
         if let owner = currentState?.desktop?.account {
-            alert.informativeText = "Claude Desktop will close so its login can move from \(owner) to \(account)."
+            alert.informativeText = "If it’s running, Claude Desktop will quit, move its login from \(owner) to \(account), and reopen."
         } else {
-            alert.informativeText = "Claude Desktop will close. Its current login will be preserved safely before switching."
+            alert.informativeText = "If it’s running, Claude Desktop will quit, preserve its current login safely, switch accounts, and reopen."
         }
         alert.addButton(withTitle: "Switch")
         alert.addButton(withTitle: "Cancel")
         return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    private func claudeDesktopIcon() -> NSImage? {
+        if let appURL = NSWorkspace.shared.urlForApplication(
+            withBundleIdentifier: "com.anthropic.claudefordesktop"
+        ), let icon = NSWorkspace.shared.icon(forFile: appURL.path).copy() as? NSImage {
+            icon.size = NSSize(width: 64, height: 64)
+            icon.accessibilityDescription = "Claude Desktop"
+            return icon
+        }
+        return symbolAlertIcon(named: "desktopcomputer", description: "Claude Desktop")
+    }
+
+    private func symbolAlertIcon(named name: String, description: String) -> NSImage? {
+        let configuration = NSImage.SymbolConfiguration(pointSize: 48, weight: .regular)
+        return NSImage(systemSymbolName: name, accessibilityDescription: description)?
+            .withSymbolConfiguration(configuration)
     }
 
     private func setStatusIcon(letter: String, description: String) {

@@ -399,6 +399,13 @@ _cb_desktop_quit() {
   return 0
 }
 
+_cb_desktop_launch() {
+  if ! open -b com.anthropic.claudefordesktop >/dev/null 2>&1; then
+    echo "claude-billing: account switched, but Claude.app could not be reopened" >&2
+    return 1
+  fi
+}
+
 # Copy the live desktop login into <name>'s stash. Copies are verified before
 # being trusted; live files are never removed here.
 _cb_desktop_backup() {
@@ -533,14 +540,15 @@ _cb_desktop_restore() {
 
 # Move the desktop app login to <acct>. prev seeds ownership the first time,
 # before the .active marker exists (the `desktop` command asks the user whose
-# login it is). Failures leave the live login untouched and never fail the
-# overall switch.
+# login it is). Swap failures leave the tracked owner unchanged. Relaunch is
+# best-effort after a successful swap because ownership has already committed.
 _cb_desktop_switch() {
-  local acct="$1" prev="$2" owner
+  local acct="$1" prev="$2" owner was_running=0
   _cb_desktop_available || return 0
   owner=$(_cb_desktop_owner_get)
   [[ -z "$owner" ]] && owner="$prev"
   [[ "$owner" == "$acct" ]] && return 0
+  pgrep -xq Claude && was_running=1
   if ! _cb_desktop_quit; then
     echo "Desktop app: Claude.app login left unchanged"
     return 0
@@ -557,7 +565,10 @@ _cb_desktop_switch() {
     echo "claude-billing: couldn't tell which account owned the desktop login — copy kept in $(_cb_desktop_stash_root)/.unclaimed" >&2
   fi
   if _cb_desktop_restore "$acct"; then
-    _cb_desktop_owner_set "$acct"
+    _cb_desktop_owner_set "$acct" || return 1
+    if [[ "$was_running" -eq 1 ]]; then
+      _cb_desktop_launch || true
+    fi
   else
     echo "claude-billing: failed to restore desktop login for '$acct' — stash preserved" >&2
   fi
@@ -802,7 +813,7 @@ claude_billing() {
         fi
         owner="$claim"
       fi
-      _cb_desktop_switch "$name" "$owner"
+      _cb_desktop_switch "$name" "$owner" || return 1
       [[ "$(_cb_desktop_owner_get)" == "$name" ]] || return 1
       ;;
 

@@ -90,6 +90,39 @@ desktop_backup_replaces_a_stale_logged_in_session() (
   assert_eq "personal-session" "$(cat "$app/Cookies")" "target session should become live"
 )
 
+desktop_switch_relaunches_a_running_app() (
+  HOME="$TEST_ROOT/desktop-relaunch"
+  export HOME
+  # shellcheck source=../claude_billing.sh
+  . "$SCRIPT"
+  _CB_PLATFORM="windows"
+  running="$HOME/claude-running"
+  open_call="$HOME/open-call"
+  mkdir -p "$HOME"
+  touch "$running"
+  pgrep() { [ -f "$running" ]; }
+  osascript() { rm -f "$running"; }
+  open() { printf '%s\n' "$*" > "$open_call"; }
+  sleep() { :; }
+  # shellcheck disable=SC2034  # assigns _cb_desktop_quit's dynamically scoped local
+  _cb_read() { confirm=""; }
+
+  app="$HOME/Library/Application Support/Claude"
+  target="$HOME/.claude-billing/desktop/personal"
+  mkdir -p "$app" "$target"
+  printf '%s' 'work-session' > "$app/Cookies"
+  printf '%s' '{}' > "$app/config.json"
+  printf '%s' 'personal-session' > "$target/Cookies"
+  printf '%s' '{}' > "$target/config-oauth.json"
+  _cb_accounts_write "work personal" "work"
+  _cb_desktop_owner_set "work"
+
+  claude_billing desktop personal >/dev/null 2>&1 || return 1
+
+  assert_eq "-b com.anthropic.claudefordesktop" "$(cat "$open_call")" "a running Claude.app should reopen after switching" || return 1
+  assert_eq "personal" "$(_cb_desktop_owner_get)" "the target account should own the relaunched app"
+)
+
 nounset_no_args_shows_usage() (
   HOME="$TEST_ROOT/nounset"
   export HOME
@@ -619,6 +652,8 @@ run_test "failed desktop restore preserves live and stashed sessions" \
   desktop_restore_failure_preserves_both_sessions
 run_test "desktop backup replaces a stale logged-in session" \
   desktop_backup_replaces_a_stale_logged_in_session
+run_test "desktop switch relaunches a running app" \
+  desktop_switch_relaunches_a_running_app
 run_test "no-argument invocation works with nounset" \
   nounset_no_args_shows_usage
 run_test "Bedrock rejects an empty explicit AWS profile" \
