@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/hschin/claude-billing/actions/workflows/ci.yml/badge.svg)](https://github.com/hschin/claude-billing/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)](https://github.com/hschin/claude-billing#requirements)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)](https://github.com/hschin/claude-billing#platform-support)
 [![Shell](https://img.shields.io/badge/shell-bash%20%7C%20zsh-89E051?logo=gnubash)](https://github.com/hschin/claude-billing#notes)
 
 A shell utility for switching [Claude Code](https://claude.ai/code) between billing modes without manually editing config files. Install once, switch instantly.
@@ -24,6 +24,20 @@ Each switch edits `~/.claude/settings.json` and handles credential backup and re
 | AWS CLI | [aws.amazon.com/cli](https://aws.amazon.com/cli/) | [aws.amazon.com/cli](https://aws.amazon.com/cli/) | [aws.amazon.com/cli](https://aws.amazon.com/cli/) |
 
 AWS CLI is only required for Bedrock.
+
+## Platform support
+
+The core Claude Code billing commands work across the supported shells on all three platforms. Desktop integration is currently available only on macOS.
+
+| Feature | macOS | Linux | Windows (Git Bash or WSL) |
+|---------|-------|-------|---------------------------|
+| Subscription, Anthropic API, and Bedrock switching | Supported | Supported | Supported |
+| Multiple subscription accounts | Supported | Supported | Supported |
+| Prompt and statusline indicator | Supported | Supported | Supported |
+| Claude Desktop account switching | Supported | Not yet supported | Not yet supported |
+| Native menu bar or system tray app | Supported | Not yet supported | Not yet supported |
+
+Contributions that add or improve Linux and Windows support—especially Claude Desktop account switching and native system tray integrations—are welcome.
 
 ## Install
 
