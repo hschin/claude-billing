@@ -30,7 +30,10 @@ if ! command -v swiftc >/dev/null 2>&1; then
   exit 1
 fi
 
-script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || true)
+script_dir=""
+if script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd); then
+  :
+fi
 local_source="$script_dir/menubar/Sources/ClaudeBillingMenuBar/main.swift"
 temporary_dir=$(mktemp -d "${TMPDIR:-/tmp}/claude-billing-menubar.XXXXXX")
 temporary_app="$temporary_dir/Claude Billing.app"

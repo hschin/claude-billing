@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC1091,SC2016,SC2329
+# The test cases define command mocks that ShellCheck cannot see being invoked
+# after claude_billing.sh is sourced. SC2317 is used by ShellCheck 0.9, while
+# newer releases report the same intentional pattern as SC2329.
+# shellcheck disable=SC1091,SC2016,SC2317,SC2329
 
 # Behavioral regression tests. Run from the repository root with bash and zsh.
 
