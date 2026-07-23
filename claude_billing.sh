@@ -748,13 +748,17 @@ claude_billing() {
       ;;
 
     remove-account)
-      local name="${2:-}" confirm=""
-      [[ -z "$name" ]] && { echo "Usage: claude-billing remove-account <name>"; return 1; }
+      local name="${2:-}" confirm="" assume_yes="${3:-}"
+      [[ -z "$name" ]] && { echo "Usage: claude-billing remove-account <name> [--yes]"; return 1; }
+      if [[ -n "$assume_yes" && "$assume_yes" != "--yes" ]]; then
+        echo "Usage: claude-billing remove-account <name> [--yes]"
+        return 1
+      fi
       if ! _cb_account_registered "$name"; then
         echo "claude-billing: unknown account '$name'"
         return 1
       fi
-      if [[ "$(_cb_active_get)" == "$name" ]]; then
+      if [[ "$(_cb_active_get)" == "$name" && "$assume_yes" != "--yes" ]]; then
         printf "'%s' is the current live login. Remove it from claude-billing anyway? (You stay logged in.) [y/N]: " "$name"
         _cb_read -r confirm
         [[ "$confirm" =~ ^[Yy]$ ]] || { echo "Aborted."; return 1; }

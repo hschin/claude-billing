@@ -18,6 +18,7 @@ final class BillingStateTests: XCTestCase {
         let state = try JSONDecoder().decode(BillingState.self, from: data)
 
         XCTAssertEqual(state.displayName, "AWS Bedrock · work-aws")
+        XCTAssertEqual(state.claudeCodeDisplayName, "Claude Code CLI · AWS Bedrock · work-aws")
     }
 
     func testSubscriptionActionPassesTheAccountAsASeparateArgument() {
@@ -63,5 +64,29 @@ final class BillingStateTests: XCTestCase {
         let state = try JSONDecoder().decode(BillingState.self, from: data)
 
         XCTAssertEqual(state.desktop?.account, "personal")
+    }
+
+    func testManagementCommandsDelegateToTheCLI() {
+        XCTAssertEqual(
+            ManagementCommand.removeAccount("work").arguments,
+            ["remove-account", "work", "--yes"]
+        )
+        XCTAssertEqual(ManagementCommand.configureBedrock.arguments, ["config"])
+        XCTAssertEqual(ManagementCommand.updateAPIKey.arguments, ["add-key"])
+        XCTAssertEqual(ManagementCommand.login.arguments, ["login"])
+    }
+
+    func testAccountNameValidationMatchesTheCLI() {
+        XCTAssertTrue(isValidAccountName("work-2_primary"))
+        XCTAssertFalse(isValidAccountName(""))
+        XCTAssertFalse(isValidAccountName("work account"))
+        XCTAssertFalse(isValidAccountName("work;open"))
+    }
+
+    func testTerminalScriptQuotesEveryArgument() {
+        let script = terminalScript(arguments: ["add-account", "team's"])
+
+        XCTAssertTrue(script.contains("claude_billing 'add-account' 'team'\"'\"'s'"))
+        XCTAssertTrue(script.contains("source \"$HOME/.claude-billing/claude_billing.sh\""))
     }
 }

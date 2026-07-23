@@ -36,6 +36,10 @@ struct BillingState: Decodable, Equatable {
         }
     }
 
+    var claudeCodeDisplayName: String {
+        "Claude Code CLI · \(displayName)"
+    }
+
     var symbolName: String {
         switch kind {
         case "api": return "key.fill"
@@ -97,6 +101,82 @@ enum BillingAction: Equatable {
     }
 }
 
+enum ManagementCommand: Equatable {
+    case addAccount(String)
+    case removeAccount(String)
+    case configureBedrock
+    case updateAPIKey
+    case login
+
+    var arguments: [String] {
+        switch self {
+        case let .addAccount(account):
+            return ["add-account", account]
+        case let .removeAccount(account):
+            return ["remove-account", account, "--yes"]
+        case .configureBedrock:
+            return ["config"]
+        case .updateAPIKey:
+            return ["add-key"]
+        case .login:
+            return ["login"]
+        }
+    }
+
+    var progressDescription: String {
+        switch self {
+        case let .removeAccount(account):
+            return "Removing account \(account)"
+        case let .addAccount(account):
+            return "Adding account \(account)"
+        case .configureBedrock:
+            return "Configuring AWS Bedrock"
+        case .updateAPIKey:
+            return "Updating the Anthropic API key"
+        case .login:
+            return "Signing in to Claude.ai"
+        }
+    }
+
+    var errorTitle: String {
+        switch self {
+        case .removeAccount:
+            return "Couldn’t Remove Account"
+        case .addAccount:
+            return "Couldn’t Add Account"
+        case .configureBedrock:
+            return "Couldn’t Open Bedrock Configuration"
+        case .updateAPIKey:
+            return "Couldn’t Open API Key Setup"
+        case .login:
+            return "Couldn’t Open Claude.ai Login"
+        }
+    }
+}
+
+func isValidAccountName(_ name: String) -> Bool {
+    !name.isEmpty && name.range(of: #"^[A-Za-z0-9_-]+$"#, options: .regularExpression) != nil
+}
+
+func shellQuote(_ value: String) -> String {
+    "'" + value.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
+}
+
+func terminalScript(arguments: [String]) -> String {
+    let quotedArguments = arguments.map(shellQuote).joined(separator: " ")
+    return """
+    #!/bin/zsh
+    script_path="$0"
+    rm -f "$script_path"
+    source "$HOME/.claude-billing/claude_billing.sh"
+    claude_billing \(quotedArguments)
+    command_status=$?
+    printf '\nPress Return to close this window.'
+    read -r
+    exit "$command_status"
+    """
+}
+
 func conciseMenuMessage(_ message: String, limit: Int = 96) -> String {
     let singleLine = message
         .split(whereSeparator: \Character.isNewline)
@@ -149,7 +229,30 @@ private final class BillingClient {
     }
 
     func perform(_ action: BillingAction, completion: @escaping (Result<String, Error>) -> Void) {
-        run(arguments: action.arguments) { result in
+        perform(arguments: action.arguments, completion: completion)
+    }
+
+    func perform(_ command: ManagementCommand, completion: @escaping (Result<String, Error>) -> Void) {
+        perform(arguments: command.arguments, completion: completion)
+    }
+
+    func openInTerminal(_ command: ManagementCommand) throws {
+        let scriptURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("claude-billing-\(UUID().uuidString).command")
+        do {
+            try terminalScript(arguments: command.arguments).write(to: scriptURL, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: scriptURL.path)
+            guard NSWorkspace.shared.open(scriptURL) else {
+                throw BillingClientError.commandFailed("Terminal could not open the claude-billing command.")
+            }
+        } catch {
+            try? FileManager.default.removeItem(at: scriptURL)
+            throw error
+        }
+    }
+
+    private func perform(arguments: [String], completion: @escaping (Result<String, Error>) -> Void) {
+        run(arguments: arguments) { result in
             guard result.status == 0 else {
                 completion(.failure(BillingClientError.commandFailed(result.message)))
                 return
@@ -235,7 +338,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
                     self.currentState = state
                     self.setStatusIcon(
                         letter: state.statusIconLetter,
-                        description: "Claude Billing — \(state.displayName)"
+                        description: "Claude Code CLI — \(state.displayName)"
                     )
                     self.rebuildMenu()
                 case let .failure(error):
@@ -260,13 +363,13 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(detailItem)
             menu.addItem(.separator())
         } else if let currentState {
-            let currentItem = NSMenuItem(title: "Current: \(currentState.displayName)", action: nil, keyEquivalent: "")
+            let currentItem = NSMenuItem(title: currentState.claudeCodeDisplayName, action: nil, keyEquivalent: "")
             currentItem.image = menuImage(named: currentState.symbolName, description: currentState.displayName)
             currentItem.isEnabled = false
             menu.addItem(currentItem)
             menu.addItem(.separator())
 
-            menu.addItem(sectionItem(title: currentState.accounts.isEmpty ? "Subscription" : "Subscriptions"))
+            menu.addItem(sectionItem(title: currentState.accounts.isEmpty ? "CLI subscription" : "CLI subscriptions"))
 
             if currentState.accounts.isEmpty {
                 menu.addItem(actionItem(
@@ -287,7 +390,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             }
 
             menu.addItem(.separator())
-            menu.addItem(sectionItem(title: "Other billing"))
+            menu.addItem(sectionItem(title: "Other CLI billing"))
             menu.addItem(actionItem(
                 title: "Anthropic API",
                 action: .api,
@@ -305,7 +408,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             ))
             menu.addItem(.separator())
 
-            let restartItem = NSMenuItem(title: "Billing changes require a Claude Code restart", action: nil, keyEquivalent: "")
+            let restartItem = NSMenuItem(title: "CLI billing changes require a Claude Code restart", action: nil, keyEquivalent: "")
             restartItem.image = menuImage(named: "exclamationmark.circle", description: "Restart required")
             restartItem.isEnabled = false
             menu.addItem(restartItem)
@@ -332,6 +435,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
                     }
                 }
             }
+            menu.addItem(.separator())
+            menu.addItem(managementMenuItem(for: currentState))
             menu.addItem(.separator())
         }
 
@@ -372,6 +477,75 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         return item
     }
 
+    private func managementMenuItem(for state: BillingState) -> NSMenuItem {
+        let item = NSMenuItem(title: "Manage Claude Code CLI", action: nil, keyEquivalent: "")
+        item.image = menuImage(named: "gearshape", description: "Manage Claude Code CLI")
+        let submenu = NSMenu()
+
+        submenu.addItem(menuActionItem(
+            title: "Add Subscription Account…",
+            action: #selector(addAccountClicked),
+            symbolName: "person.crop.circle.badge.plus"
+        ))
+
+        let removeItem = NSMenuItem(title: "Remove Subscription Account", action: nil, keyEquivalent: "")
+        removeItem.image = menuImage(named: "person.crop.circle.badge.minus", description: "Remove Subscription Account")
+        let removeMenu = NSMenu()
+        if state.accounts.isEmpty {
+            let emptyItem = NSMenuItem(title: "No Registered Accounts", action: nil, keyEquivalent: "")
+            emptyItem.isEnabled = false
+            removeMenu.addItem(emptyItem)
+        } else {
+            for account in state.accounts {
+                let accountItem = NSMenuItem(
+                    title: "\(account)…",
+                    action: #selector(removeAccountClicked(_:)),
+                    keyEquivalent: ""
+                )
+                accountItem.target = self
+                accountItem.representedObject = account
+                accountItem.image = menuImage(named: "person.crop.circle", description: account)
+                accountItem.isEnabled = !isSwitching
+                removeMenu.addItem(accountItem)
+            }
+        }
+        removeItem.submenu = removeMenu
+        submenu.addItem(removeItem)
+        submenu.addItem(.separator())
+
+        submenu.addItem(menuActionItem(
+            title: "Configure AWS Bedrock…",
+            action: #selector(configureBedrockClicked),
+            symbolName: "cloud"
+        ))
+        submenu.addItem(menuActionItem(
+            title: "Update Anthropic API Key…",
+            action: #selector(updateAPIKeyClicked),
+            symbolName: "key"
+        ))
+        submenu.addItem(menuActionItem(
+            title: "Sign In to Claude.ai…",
+            action: #selector(loginClicked),
+            symbolName: "person.crop.circle.badge.checkmark"
+        ))
+        submenu.addItem(.separator())
+
+        let terminalNote = NSMenuItem(title: "Interactive setup opens in Terminal", action: nil, keyEquivalent: "")
+        terminalNote.isEnabled = false
+        submenu.addItem(terminalNote)
+
+        item.submenu = submenu
+        return item
+    }
+
+    private func menuActionItem(title: String, action: Selector, symbolName: String) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        item.target = self
+        item.image = menuImage(named: symbolName, description: title)
+        item.isEnabled = !isSwitching
+        return item
+    }
+
     @objc private func switchClicked(_ sender: NSMenuItem) {
         guard let action = sender.representedObject as? BillingAction, !isSwitching else { return }
         if case let .desktop(account) = action, !confirmDesktopSwitch(to: account) {
@@ -398,6 +572,93 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func refreshClicked() {
         refreshState(showError: true)
+    }
+
+    @objc private func addAccountClicked() {
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.icon = symbolAlertIcon(named: "person.crop.circle.badge.plus", description: "Add Account")
+        alert.messageText = "Add a Claude Code CLI subscription account"
+        alert.informativeText = "Choose a short name such as work or personal. Authentication continues in Terminal."
+        alert.addButton(withTitle: "Continue")
+        alert.addButton(withTitle: "Cancel")
+
+        let nameField = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
+        nameField.placeholderString = "Account name"
+        nameField.setAccessibilityLabel("Account name")
+        alert.accessoryView = nameField
+        alert.window.initialFirstResponder = nameField
+
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let account = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard isValidAccountName(account) else {
+            showError(
+                BillingClientError.invalidState("Use only letters, numbers, hyphens, and underscores."),
+                title: "Invalid Account Name"
+            )
+            return
+        }
+        guard currentState?.accounts.contains(account) != true else {
+            showError(
+                BillingClientError.invalidState("An account named \(account) is already registered."),
+                title: "Account Already Exists"
+            )
+            return
+        }
+        openInTerminal(.addAccount(account))
+    }
+
+    @objc private func removeAccountClicked(_ sender: NSMenuItem) {
+        guard let account = sender.representedObject as? String, !isSwitching else { return }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.icon = symbolAlertIcon(named: "person.crop.circle.badge.minus", description: "Remove Account")
+        alert.messageText = "Remove \(account) from Claude Billing?"
+        alert.informativeText = "Stored Claude Code CLI credentials and any saved Claude Desktop session for this account will be removed. A live login stays signed in but will no longer be managed."
+        alert.addButton(withTitle: "Remove")
+        alert.addButton(withTitle: "Cancel")
+        alert.buttons.first?.hasDestructiveAction = true
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        performManagement(.removeAccount(account))
+    }
+
+    @objc private func configureBedrockClicked() {
+        openInTerminal(.configureBedrock)
+    }
+
+    @objc private func updateAPIKeyClicked() {
+        openInTerminal(.updateAPIKey)
+    }
+
+    @objc private func loginClicked() {
+        openInTerminal(.login)
+    }
+
+    private func openInTerminal(_ command: ManagementCommand) {
+        do {
+            try client.openInTerminal(command)
+        } catch {
+            showError(error, title: command.errorTitle)
+        }
+    }
+
+    private func performManagement(_ command: ManagementCommand) {
+        isSwitching = true
+        setSwitchingIndicator(description: "Claude Billing — \(command.progressDescription)…")
+        rebuildMenu()
+        client.perform(command) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.isSwitching = false
+                switch result {
+                case .success:
+                    self.refreshState(showError: true)
+                case let .failure(error):
+                    self.showError(error, title: command.errorTitle)
+                    self.refreshState(showError: false)
+                }
+            }
+        }
     }
 
     @objc private func quitClicked() {

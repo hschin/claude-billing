@@ -382,6 +382,32 @@ remove_account_keeps_registration_when_secret_deletion_fails() (
     "stored token must remain manageable"
 )
 
+remove_account_yes_skips_the_active_account_prompt() (
+  HOME="$TEST_ROOT/remove-account-yes"
+  export HOME
+  # shellcheck source=../claude_billing.sh
+  . "$SCRIPT"
+  _CB_PLATFORM="windows"
+  prompt_marker="$HOME/prompted"
+  _cb_read() { touch "$prompt_marker"; return 1; }
+
+  mkdir -p "$HOME/.claude-billing/desktop/work"
+  _cb_accounts_write "work personal" "work"
+
+  claude_billing remove-account work --yes >/dev/null 2>&1 || return 1
+
+  [ ! -e "$prompt_marker" ] || {
+    printf '    --yes unexpectedly prompted for confirmation\n' >&2
+    return 1
+  }
+  assert_eq "personal" "$(_cb_accounts_list)" "confirmed removal should update the registry" || return 1
+  assert_eq "" "$(_cb_active_get)" "confirmed removal should clear active ownership" || return 1
+  [ ! -e "$HOME/.claude-billing/desktop/work" ] || {
+    printf '    confirmed removal left the desktop stash behind\n' >&2
+    return 1
+  }
+)
+
 uninstall_reports_failed_secret_deletion() (
   HOME="$TEST_ROOT/uninstall-secret-failure"
   export HOME
@@ -674,6 +700,8 @@ run_test "add-key preserves shell state when storage fails" \
   add_key_preserves_shell_state_when_storage_fails
 run_test "remove-account keeps registration when secret deletion fails" \
   remove_account_keeps_registration_when_secret_deletion_fails
+run_test "remove-account --yes skips the active account prompt" \
+  remove_account_yes_skips_the_active_account_prompt
 run_test "uninstall reports failed secret deletion" \
   uninstall_reports_failed_secret_deletion
 run_test "Bedrock explicit profile is shown in the mode indicator" \

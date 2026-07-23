@@ -21,7 +21,7 @@ This repository contains a sourced shell utility for switching Claude Code among
 - Bedrock profile resolution is explicit settings first, inherited `AWS_PROFILE` second, and `default` last. Indicators use `bedrock:<profile>`.
 - Claude Desktop login ownership is independent of Claude Code billing. Desktop sessions are stashed per account, and the app must quit before session files are swapped. An explicit failed or cancelled `desktop <name>` command returns an error without changing ownership.
 - API, Bedrock, and legacy subscription transitions roll back Claude Code settings when OAuth backup, restore, or login fails. Do not update the mode cache or print success before the transition completes.
-- The menu-bar app consumes `status --json` and delegates all switches back to the shell utility. Do not duplicate credential or settings transition logic in Swift. Pass account names as separate process arguments.
+- The menu-bar app consumes `status --json` and delegates switches and account management back to the shell utility. Do not duplicate credential or settings transition logic in Swift. Pass account names as separate process arguments, and keep interactive authentication, secret entry, and Bedrock configuration in the CLI.
 - The menu-bar badge maps subscription, API, and Bedrock to `S`, `A`, and `B`. Claude Desktop state belongs in its separate dropdown section and does not affect the billing badge.
 
 ## Editing guidelines
