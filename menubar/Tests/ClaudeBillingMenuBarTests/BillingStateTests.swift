@@ -12,6 +12,16 @@ final class BillingStateTests: XCTestCase {
         XCTAssertEqual(bedrock.statusIconLetter, "B")
     }
 
+    func testStatusIconContentIsCenteredWithinTheBadge() {
+        let badge = CGRect(x: 1.25, y: 1.25, width: 15.5, height: 15.5)
+        let glyphBounds = CGRect(x: -0.4, y: 1.1, width: 7.2, height: 8.6)
+
+        let origin = centeredDrawingOrigin(contentBounds: glyphBounds, in: badge)
+
+        XCTAssertEqual(glyphBounds.midX + origin.x, badge.midX, accuracy: 0.0001)
+        XCTAssertEqual(glyphBounds.midY + origin.y, badge.midY, accuracy: 0.0001)
+    }
+
     func testBedrockDisplayIncludesTheEffectiveAWSProfile() throws {
         let data = Data(#"{"mode":"bedrock:work-aws","kind":"bedrock","account":null,"awsProfile":"work-aws","accounts":["work","personal"]}"#.utf8)
 

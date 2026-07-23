@@ -1,4 +1,5 @@
 import AppKit
+import CoreText
 import Foundation
 
 struct DesktopState: Decodable, Equatable {
@@ -186,6 +187,13 @@ func conciseMenuMessage(_ message: String, limit: Int = 96) -> String {
     let fallback = singleLine.isEmpty ? "No additional details were provided." : singleLine
     guard fallback.count > limit else { return fallback }
     return String(fallback.prefix(max(1, limit - 1))) + "…"
+}
+
+func centeredDrawingOrigin(contentBounds: CGRect, in container: CGRect) -> CGPoint {
+    CGPoint(
+        x: container.midX - contentBounds.midX,
+        y: container.midY - contentBounds.midY
+    )
 }
 
 private struct CommandResult {
@@ -760,22 +768,23 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             NSColor.labelColor.setStroke()
             badge.stroke()
 
-            let paragraph = NSMutableParagraphStyle()
-            paragraph.alignment = .center
             let baseFont = NSFont.systemFont(ofSize: 10.5, weight: .bold)
             let roundedFont = baseFont.fontDescriptor.withDesign(.rounded)
                 .flatMap { NSFont(descriptor: $0, size: 10.5) } ?? baseFont
             let attributes: [NSAttributedString.Key: Any] = [
                 .font: roundedFont,
                 .foregroundColor: NSColor.labelColor,
-                .paragraphStyle: paragraph,
             ]
             let text = NSAttributedString(string: letter, attributes: attributes)
-            let textSize = text.size()
-            text.draw(at: NSPoint(
-                x: floor((rect.width - textSize.width) / 2),
-                y: floor((rect.height - textSize.height) / 2) - 0.25
-            ))
+            let line = CTLineCreateWithAttributedString(text)
+            let textBounds = CTLineGetBoundsWithOptions(line, [.useGlyphPathBounds])
+            let textOrigin = centeredDrawingOrigin(contentBounds: textBounds, in: badgeRect)
+            if let context = NSGraphicsContext.current?.cgContext {
+                context.saveGState()
+                context.textPosition = textOrigin
+                CTLineDraw(line, context)
+                context.restoreGState()
+            }
             return true
         }
         image.isTemplate = true
