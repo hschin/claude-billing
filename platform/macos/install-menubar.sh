@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Build, install, or remove the native macOS menu bar app.
 set -euo pipefail
 
 REPO_URL="https://raw.githubusercontent.com/hschin/claude-billing/main"
@@ -34,7 +35,7 @@ script_dir=""
 if script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd); then
   :
 fi
-local_source="$script_dir/menubar/Sources/ClaudeBillingMenuBar/main.swift"
+local_source="$script_dir/../../menubar/Sources/ClaudeBillingMenuBar/main.swift"
 temporary_dir=$(mktemp -d "${TMPDIR:-/tmp}/claude-billing-menubar.XXXXXX")
 temporary_app="$temporary_dir/Claude Billing.app"
 source_file="$local_source"

@@ -6,7 +6,7 @@ This repository contains a sourced shell utility for switching Claude Code among
 
 - `claude_billing.sh` contains the shell helpers, credential abstraction, account registry, Desktop-session switching, and `claude_billing()` dispatcher.
 - `install.sh` installs or updates the sourced utility and the macOS menu-bar helper.
-- `install-menubar.sh` builds, installs, and removes the optional native macOS menu-bar app.
+- `platform/macos/install-menubar.sh` builds, installs, and removes the optional native macOS menu-bar app.
 - `menubar/` contains the AppKit app and Swift package tests.
 - `test/run.sh` contains behavioral regression tests that run under both supported shells.
 - `README.md` is the user-facing guide; `CLAUDE.md` contains additional maintainer context.
@@ -40,9 +40,9 @@ This repository contains a sourced shell utility for switching Claude Code among
 Run all checks before claiming completion or committing:
 
 ```sh
-bash -n claude_billing.sh install.sh install-menubar.sh test/run.sh
+bash -n claude_billing.sh install.sh platform/macos/install-menubar.sh test/run.sh
 zsh -n claude_billing.sh install.sh test/run.sh
-shellcheck claude_billing.sh install.sh install-menubar.sh test/run.sh
+shellcheck claude_billing.sh install.sh platform/macos/install-menubar.sh test/run.sh
 bash test/run.sh
 zsh test/run.sh
 swift test --package-path menubar   # macOS

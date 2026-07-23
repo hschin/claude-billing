@@ -93,7 +93,7 @@ if [[ "$PLATFORM" == "macos" ]]; then
   MENUBAR_INSTALLER="$INSTALL_DIR/install-menubar.sh"
   MENUBAR_TMP=$(mktemp "$INSTALL_DIR/.install-menubar.sh.XXXXXX")
   echo "Downloading menu bar installer..."
-  if curl -fsSL "$REPO_URL/install-menubar.sh" -o "$MENUBAR_TMP" && \
+  if curl -fsSL "$REPO_URL/platform/macos/install-menubar.sh" -o "$MENUBAR_TMP" && \
      [[ -s "$MENUBAR_TMP" ]] && bash -n "$MENUBAR_TMP" && \
      chmod 755 "$MENUBAR_TMP" && mv "$MENUBAR_TMP" "$MENUBAR_INSTALLER"; then
     :

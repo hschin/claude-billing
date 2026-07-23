@@ -6,7 +6,7 @@ Shell utility (sourced, not executed — must work in bash AND zsh) that switche
 
 - `claude_billing.sh` — everything: helpers, credential abstraction, account registry, `claude_billing()` dispatcher, `claude-billing` alias
 - `install.sh` — curl-pipe installer; adds `# >>> claude-billing >>>` block to RC file and installs the menu bar helper on macOS
-- `install-menubar.sh` — optional macOS menu bar app builder, login-item installer, and standalone uninstaller
+- `platform/macos/install-menubar.sh` — optional macOS menu bar app builder, login-item installer, and standalone uninstaller
 - `menubar/` — native AppKit app plus Swift package tests
 - Installed to `~/.claude-billing/`; version in `_CB_VERSION` (bump on release, separate chore commit)
 
@@ -36,6 +36,6 @@ Shell utility (sourced, not executed — must work in bash AND zsh) that switche
 
 ## Testing
 
-- Static checks: `bash -n claude_billing.sh install.sh install-menubar.sh test/run.sh`, `zsh -n claude_billing.sh install.sh test/run.sh`, and `shellcheck claude_billing.sh install.sh install-menubar.sh test/run.sh`.
+- Static checks: `bash -n claude_billing.sh install.sh platform/macos/install-menubar.sh test/run.sh`, `zsh -n claude_billing.sh install.sh test/run.sh`, and `shellcheck claude_billing.sh install.sh platform/macos/install-menubar.sh test/run.sh`.
 - Behavioral suite: run both `bash test/run.sh` and `zsh test/run.sh`. Tests use isolated fake home directories and the Windows file-backed credential store so credential failures can be exercised without touching real secrets.
 - Menu bar suite: run `swift test --package-path menubar` on macOS. The shell suite also exercises bundle and launch-agent installation with a fake toolchain.

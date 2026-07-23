@@ -546,7 +546,7 @@ menubar_installer_creates_an_app_and_launch_agent() (
   printf '%s\n' '#!/bin/sh' 'exit 0' > "$bin/launchctl"
   chmod +x "$bin/uname" "$bin/swiftc" "$bin/launchctl"
 
-  HOME="$home" PATH="$bin:$PATH" bash "$REPO_DIR/install-menubar.sh" >/dev/null 2>&1
+  HOME="$home" PATH="$bin:$PATH" bash "$REPO_DIR/platform/macos/install-menubar.sh" >/dev/null 2>&1
   rc=$?
 
   assert_eq "0" "$rc" "menu bar installation should succeed" || return 1
@@ -654,7 +654,7 @@ installer_downloads_the_menubar_helper_on_macos() (
     printf '%s\n' 'done'
     printf '%s\n' 'case "$url" in'
     printf '  */claude_billing.sh) cp %s/claude_billing.sh "$out"; printf '\''\\n_cb_read() { read "$@"; }\\n'\'' >> "$out" ;;\n' "$REPO_DIR"
-    printf '  */install-menubar.sh) cp %s/install-menubar.sh "$out" ;;\n' "$REPO_DIR"
+    printf '  */platform/macos/install-menubar.sh) cp %s/platform/macos/install-menubar.sh "$out" ;;\n' "$REPO_DIR"
     printf '%s\n' '  *) exit 22 ;;'
     printf '%s\n' 'esac'
   } > "$bin/curl"
