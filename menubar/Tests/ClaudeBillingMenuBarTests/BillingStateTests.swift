@@ -260,6 +260,18 @@ final class BillingStateTests: XCTestCase {
         XCTAssertEqual(image.accessibilityDescription, "42 percent used")
     }
 
+    func testUsageBarAttachmentCarriesTheBarInline() {
+        let attachment = usageBarAttachment(percent: 42, color: .systemGreen)
+
+        // One attachment run, so it can trail a title instead of taking the
+        // icon column and indenting that row's text past the others.
+        XCTAssertEqual(attachment.length, 1)
+        let value = attachment.attribute(.attachment, at: 0, effectiveRange: nil)
+        let embedded = (value as? NSTextAttachment)?.image
+        XCTAssertEqual(embedded?.size, NSSize(width: 46, height: 8))
+        XCTAssertEqual((value as? NSTextAttachment)?.bounds.width, 46)
+    }
+
     func testUsageLevelThresholdsMapToTrafficLightColours() {
         XCTAssertEqual(UsageLevel(percent: 0).color, NSColor.systemGreen)
         XCTAssertEqual(UsageLevel(percent: 59).color, NSColor.systemGreen)

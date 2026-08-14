@@ -132,6 +132,21 @@ func usageBarImage(
     return image
 }
 
+/// The bar as an inline run of text, for placing it *after* a title. A menu
+/// item's image always precedes its title and occupies the shared icon column,
+/// so a wide bar there would indent that row's text past every other row.
+func usageBarAttachment(
+    percent: Int,
+    color: NSColor,
+    size: NSSize = NSSize(width: 46, height: 8)
+) -> NSAttributedString {
+    let attachment = NSTextAttachment()
+    attachment.image = usageBarImage(percent: percent, color: color, size: size)
+    // Nudged down so the bar sits on the text's optical centre, not its baseline.
+    attachment.bounds = CGRect(x: 0, y: -1, width: size.width, height: size.height)
+    return NSAttributedString(attachment: attachment)
+}
+
 /// One plan limit as reported by Claude's OAuth usage endpoint.
 struct UsageLimit: Decodable, Equatable {
     let kind: String
@@ -845,8 +860,19 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         // The bar carries the headline number; which limit it is, and when it
         // clears, belong on hover rather than in the row.
         if let active, let headline = active.headline, active.isOK {
-            item.title = "Plan usage · \(headline.percent)%"
-            item.image = usageBarImage(percent: headline.percent, color: headline.level.color)
+            let text = "Plan usage · \(headline.percent)%  "
+            item.title = text
+            // Keep the shared icon column, and trail the bar after the text so
+            // this row's label lines up with every other row's.
+            let attributed = NSMutableAttributedString(string: text, attributes: [
+                .font: NSFont.menuFont(ofSize: 0),
+                .foregroundColor: NSColor.labelColor,
+            ])
+            attributed.append(usageBarAttachment(
+                percent: headline.percent,
+                color: headline.level.color
+            ))
+            item.attributedTitle = attributed
             item.toolTip = "\(active.displayName): \(headline.detailLabel) · \(headline.percent)% used"
             item.setAccessibilityLabel("Plan usage: \(headline.detailLabel), \(headline.percent) percent used")
         } else if let active, let problem = active.problem {
