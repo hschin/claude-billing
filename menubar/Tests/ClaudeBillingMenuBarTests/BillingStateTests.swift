@@ -236,17 +236,28 @@ final class BillingStateTests: XCTestCase {
         XCTAssertNil(account([]).headline)
     }
 
-    func testUsageBarFillsProportionallyWithoutMisleadingEnds() {
-        XCTAssertEqual(usageBar(percent: 0), "▯▯▯▯▯▯▯▯▯▯")
-        XCTAssertEqual(usageBar(percent: 100), "▮▮▮▮▮▮▮▮▮▮")
-        XCTAssertEqual(usageBar(percent: 50), "▮▮▮▮▮▯▯▯▯▯")
-        // Any usage at all shows a cell, and short of the limit never looks full.
-        XCTAssertEqual(usageBar(percent: 1), "▮▯▯▯▯▯▯▯▯▯")
-        XCTAssertEqual(usageBar(percent: 99), "▮▮▮▮▮▮▮▮▮▯")
-        // Out-of-range input from an unofficial endpoint must not break the bar.
-        XCTAssertEqual(usageBar(percent: -5), "▯▯▯▯▯▯▯▯▯▯")
-        XCTAssertEqual(usageBar(percent: 250), "▮▮▮▮▮▮▮▮▮▮")
-        XCTAssertEqual(usageBar(percent: 50, width: 4).count, 4)
+    func testUsageBarFillNeverMisleadsAtEitherEnd() {
+        let width: CGFloat = 46
+
+        XCTAssertEqual(usageBarFillWidth(percent: 0, width: width), 0)
+        XCTAssertEqual(usageBarFillWidth(percent: 100, width: width), width)
+        XCTAssertEqual(usageBarFillWidth(percent: 50, width: width), 23, accuracy: 0.001)
+        // 1% keeps a visible sliver instead of reading as untouched.
+        XCTAssertEqual(usageBarFillWidth(percent: 1, width: width), 3, accuracy: 0.001)
+        // 99% must not look completely full.
+        XCTAssertLessThan(usageBarFillWidth(percent: 99, width: width), width)
+        // Out-of-range values from the unofficial endpoint are clamped.
+        XCTAssertEqual(usageBarFillWidth(percent: -5, width: width), 0)
+        XCTAssertEqual(usageBarFillWidth(percent: 250, width: width), width)
+    }
+
+    func testUsageBarImageIsDrawnAtTheRequestedSize() {
+        let image = usageBarImage(percent: 42, color: .systemGreen, size: NSSize(width: 46, height: 8))
+
+        XCTAssertEqual(image.size, NSSize(width: 46, height: 8))
+        // Template images get recoloured by AppKit, which would lose the colour.
+        XCTAssertFalse(image.isTemplate)
+        XCTAssertEqual(image.accessibilityDescription, "42 percent used")
     }
 
     func testUsageLevelThresholdsMapToTrafficLightColours() {

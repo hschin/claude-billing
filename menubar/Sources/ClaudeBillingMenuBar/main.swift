@@ -89,16 +89,47 @@ enum UsageLevel {
     }
 }
 
-/// A fixed-width text meter. Menus have no progress-bar item, and block glyphs
-/// in a monospaced font align across rows without laying out a custom view.
-/// Any non-zero usage fills at least one cell, so "barely started" still reads
-/// as started rather than as nothing at all.
-func usageBar(percent: Int, width: Int = 10) -> String {
-    let clamped = min(max(percent, 0), 100)
-    var filled = Int((Double(clamped) / 100.0 * Double(width)).rounded())
-    if clamped > 0 && filled == 0 { filled = 1 }
-    if clamped < 100 && filled == width { filled = width - 1 }
-    return String(repeating: "▮", count: filled) + String(repeating: "▯", count: width - filled)
+/// Width of the filled part of a usage bar. Split out from the drawing so the
+/// rules are testable: a non-zero percentage always leaves a visible sliver, and
+/// anything short of 100% never fills the track completely — otherwise 1% looks
+/// untouched and 99% looks like you're already cut off. Out-of-range values from
+/// the unofficial endpoint are clamped rather than allowed to overflow.
+func usageBarFillWidth(percent: Int, width: CGFloat) -> CGFloat {
+    let clamped = CGFloat(min(max(percent, 0), 100))
+    guard clamped > 0 else { return 0 }
+    guard clamped < 100 else { return width }
+    let minimumVisible: CGFloat = 3
+    return min(max(clamped / 100 * width, minimumVisible), width - 1)
+}
+
+/// One continuous bar that fills as usage climbs. Menus have no progress-bar
+/// item, so it is drawn as the item's image — simpler and better behaved than a
+/// custom menu-item view, and it sits in the same column as every other icon.
+func usageBarImage(
+    percent: Int,
+    color: NSColor,
+    size: NSSize = NSSize(width: 46, height: 8)
+) -> NSImage {
+    let image = NSImage(size: size, flipped: false) { rect in
+        let radius = rect.height / 2
+        let track = NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius)
+        color.withAlphaComponent(0.22).setFill()
+        track.fill()
+
+        let fillWidth = usageBarFillWidth(percent: percent, width: rect.width)
+        if fillWidth > 0 {
+            let fillRect = NSRect(x: rect.minX, y: rect.minY, width: fillWidth, height: rect.height)
+            // Clip to the track so the fill keeps the rounded ends.
+            track.setClip()
+            color.setFill()
+            NSBezierPath(roundedRect: fillRect, xRadius: radius, yRadius: radius).fill()
+        }
+        return true
+    }
+    // Not a template image: templates get recoloured to match the menu.
+    image.isTemplate = false
+    image.accessibilityDescription = "\(min(max(percent, 0), 100)) percent used"
+    return image
 }
 
 /// One plan limit as reported by Claude's OAuth usage endpoint.
@@ -732,24 +763,26 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         return item
     }
 
-    /// A metered detail row: coloured bar and percentage first so both align
-    /// down the column and can be scanned without reading the labels.
+    /// A metered detail row: the bar in the icon column, then the percentage in
+    /// monospaced digits so the numbers align, then the label.
     private func meterItem(percent: Int, level: UsageLevel, label: String) -> NSMenuItem {
-        let barText = "\(usageBar(percent: percent))  \(String(format: "%3d", min(max(percent, 0), 100)))%  "
-        let title = barText + label
-        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        let shown = min(max(percent, 0), 100)
+        let percentText = String(format: "%3d%%  ", shown)
+        let item = NSMenuItem(title: percentText + label, action: nil, keyEquivalent: "")
         item.isEnabled = false
+        item.image = usageBarImage(percent: percent, color: level.color)
 
-        let attributed = NSMutableAttributedString(string: barText, attributes: [
-            .font: NSFont.monospacedSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular),
-            .foregroundColor: level.color,
+        let attributed = NSMutableAttributedString(string: percentText, attributes: [
+            .font: NSFont.monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .medium),
+            .foregroundColor: NSColor.labelColor,
         ])
         attributed.append(NSAttributedString(string: label, attributes: [
             .font: NSFont.menuFont(ofSize: NSFont.smallSystemFontSize),
             .foregroundColor: NSColor.secondaryLabelColor,
         ]))
         item.attributedTitle = attributed
-        item.setAccessibilityLabel("\(label): \(percent) percent used")
+        item.toolTip = label
+        item.setAccessibilityLabel("\(label): \(shown) percent used")
         return item
     }
 
@@ -805,22 +838,22 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     /// says so and unavailable accounts show a reason instead of a number.
     private func usageMenuItem(activeAccount: String?) -> NSMenuItem {
         let active = usage.first { $0.account == (activeAccount ?? "") } ?? usage.first
-        var title = "Plan usage"
-        var symbol = "chart.bar"
-        // The row's icon takes the headline's colour so the state is legible
-        // before the submenu is even opened.
-        var tint: NSColor?
-        if let active, let headline = active.headline, active.isOK {
-            title = "Plan usage · \(headline.percent)% \(headline.name.lowercased())"
-            tint = headline.level.color
-        } else if let active, let problem = active.problem {
-            title = "Plan usage · \(problem.split(separator: "—").first?.trimmingCharacters(in: .whitespaces) ?? problem)"
-            symbol = "exclamationmark.triangle.fill"
-        }
+        let item = NSMenuItem(title: "Plan usage", action: nil, keyEquivalent: "")
+        item.image = menuImage(named: "chart.bar", description: "Plan usage")
+        item.toolTip = "Subscription plan usage for the active Claude Code CLI account."
 
-        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
-        item.image = tint.map { tintedMenuImage(named: symbol, color: $0, description: "Plan usage") }
-            ?? menuImage(named: symbol, description: "Plan usage")
+        // The bar carries the headline number; which limit it is, and when it
+        // clears, belong on hover rather than in the row.
+        if let active, let headline = active.headline, active.isOK {
+            item.title = "Plan usage · \(headline.percent)%"
+            item.image = usageBarImage(percent: headline.percent, color: headline.level.color)
+            item.toolTip = "\(active.displayName): \(headline.detailLabel) · \(headline.percent)% used"
+            item.setAccessibilityLabel("Plan usage: \(headline.detailLabel), \(headline.percent) percent used")
+        } else if let active, let problem = active.problem {
+            item.title = "Plan usage · \(problem.split(separator: "—").first?.trimmingCharacters(in: .whitespaces) ?? problem)"
+            item.image = menuImage(named: "exclamationmark.triangle.fill", description: "Plan usage unavailable")
+            item.toolTip = "\(active.displayName): \(problem)"
+        }
 
         let submenu = NSMenu()
         for (index, account) in usage.enumerated() {
@@ -1206,17 +1239,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         image.isTemplate = true
         image.accessibilityDescription = "Claude Billing \(letter)"
         return image
-    }
-
-    /// Non-template so the colour survives: menu icons are normally template
-    /// images, which AppKit recolours to match the menu.
-    private func tintedMenuImage(named name: String, color: NSColor, description: String) -> NSImage? {
-        guard let image = NSImage(systemSymbolName: name, accessibilityDescription: description) else {
-            return nil
-        }
-        let tinted = image.withSymbolConfiguration(.init(paletteColors: [color])) ?? image
-        tinted.isTemplate = false
-        return tinted
     }
 
     private func menuImage(named name: String, description: String) -> NSImage? {
