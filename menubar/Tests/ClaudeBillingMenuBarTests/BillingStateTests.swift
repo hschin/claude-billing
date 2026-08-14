@@ -204,9 +204,9 @@ final class BillingStateTests: XCTestCase {
 
         XCTAssertEqual(usage[0].headline?.kind, "session")
         XCTAssertEqual(usage[0].headline?.percent, 72)
-        XCTAssertEqual(usage[0].limits?[0].name, "5-hour session")
+        XCTAssertEqual(usage[0].limits?[0].detailLabel, "5-hour session")
         XCTAssertEqual(usage[0].limits?[1].name, "Weekly · all models")
-        XCTAssertEqual(usage[0].spend?.menuTitle, "Extra usage credits · 86% (USD 17.20 of 20.00)")
+        XCTAssertEqual(usage[0].spend?.detailLabel, "Extra usage credits · USD 17.20 of 20.00")
         XCTAssertNil(usage[0].problem)
         XCTAssertEqual(usage[1].problem, "token expired — switch to this account to refresh")
         XCTAssertFalse(usage[1].isOK)
@@ -234,6 +234,28 @@ final class BillingStateTests: XCTestCase {
             "weekly_all"
         )
         XCTAssertNil(account([]).headline)
+    }
+
+    func testUsageBarFillsProportionallyWithoutMisleadingEnds() {
+        XCTAssertEqual(usageBar(percent: 0), "▯▯▯▯▯▯▯▯▯▯")
+        XCTAssertEqual(usageBar(percent: 100), "▮▮▮▮▮▮▮▮▮▮")
+        XCTAssertEqual(usageBar(percent: 50), "▮▮▮▮▮▯▯▯▯▯")
+        // Any usage at all shows a cell, and short of the limit never looks full.
+        XCTAssertEqual(usageBar(percent: 1), "▮▯▯▯▯▯▯▯▯▯")
+        XCTAssertEqual(usageBar(percent: 99), "▮▮▮▮▮▮▮▮▮▯")
+        // Out-of-range input from an unofficial endpoint must not break the bar.
+        XCTAssertEqual(usageBar(percent: -5), "▯▯▯▯▯▯▯▯▯▯")
+        XCTAssertEqual(usageBar(percent: 250), "▮▮▮▮▮▮▮▮▮▮")
+        XCTAssertEqual(usageBar(percent: 50, width: 4).count, 4)
+    }
+
+    func testUsageLevelThresholdsMapToTrafficLightColours() {
+        XCTAssertEqual(UsageLevel(percent: 0).color, NSColor.systemGreen)
+        XCTAssertEqual(UsageLevel(percent: 59).color, NSColor.systemGreen)
+        XCTAssertEqual(UsageLevel(percent: 60).color, NSColor.systemOrange)
+        XCTAssertEqual(UsageLevel(percent: 84).color, NSColor.systemOrange)
+        XCTAssertEqual(UsageLevel(percent: 85).color, NSColor.systemRed)
+        XCTAssertEqual(UsageLevel(percent: 100).color, NSColor.systemRed)
     }
 
     func testUsageFailuresNeverReadAsZeroPercent() {

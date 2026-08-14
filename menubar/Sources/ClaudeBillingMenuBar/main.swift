@@ -64,6 +64,43 @@ struct SSOSessionState: Decodable, Equatable {
     }
 }
 
+/// How close a limit is to biting. Thresholds are fixed rather than taken from
+/// the endpoint's own `severity`, so the same percentage always gets the same
+/// colour and the scale stays predictable.
+enum UsageLevel {
+    case ok
+    case warning
+    case critical
+
+    init(percent: Int) {
+        switch percent {
+        case ..<60: self = .ok
+        case ..<85: self = .warning
+        default: self = .critical
+        }
+    }
+
+    var color: NSColor {
+        switch self {
+        case .ok: return .systemGreen
+        case .warning: return .systemOrange
+        case .critical: return .systemRed
+        }
+    }
+}
+
+/// A fixed-width text meter. Menus have no progress-bar item, and block glyphs
+/// in a monospaced font align across rows without laying out a custom view.
+/// Any non-zero usage fills at least one cell, so "barely started" still reads
+/// as started rather than as nothing at all.
+func usageBar(percent: Int, width: Int = 10) -> String {
+    let clamped = min(max(percent, 0), 100)
+    var filled = Int((Double(clamped) / 100.0 * Double(width)).rounded())
+    if clamped > 0 && filled == 0 { filled = 1 }
+    if clamped < 100 && filled == width { filled = width - 1 }
+    return String(repeating: "▮", count: filled) + String(repeating: "▯", count: width - filled)
+}
+
 /// One plan limit as reported by Claude's OAuth usage endpoint.
 struct UsageLimit: Decodable, Equatable {
     let kind: String
@@ -95,9 +132,13 @@ struct UsageLimit: Decodable, Equatable {
         return formatter.string(from: date)
     }
 
-    var menuTitle: String {
+    var level: UsageLevel { UsageLevel(percent: percent) }
+
+    /// The bar and percentage carry the number, so the label only has to say
+    /// which limit it is and when it clears.
+    var detailLabel: String {
         let reset = resetDescription.map { " · resets \($0)" } ?? ""
-        return "\(name) · \(percent)%\(reset)"
+        return "\(name)\(reset)"
     }
 }
 
@@ -108,8 +149,10 @@ struct UsageSpend: Decodable, Equatable {
     let currency: String
     let severity: String
 
-    var menuTitle: String {
-        String(format: "Extra usage credits · %d%% (%@ %.2f of %.2f)", percent, currency, used, limit)
+    var level: UsageLevel { UsageLevel(percent: percent) }
+
+    var detailLabel: String {
+        String(format: "Extra usage credits · %@ %.2f of %.2f", currency, used, limit)
     }
 }
 
@@ -689,6 +732,27 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         return item
     }
 
+    /// A metered detail row: coloured bar and percentage first so both align
+    /// down the column and can be scanned without reading the labels.
+    private func meterItem(percent: Int, level: UsageLevel, label: String) -> NSMenuItem {
+        let barText = "\(usageBar(percent: percent))  \(String(format: "%3d", min(max(percent, 0), 100)))%  "
+        let title = barText + label
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        item.isEnabled = false
+
+        let attributed = NSMutableAttributedString(string: barText, attributes: [
+            .font: NSFont.monospacedSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular),
+            .foregroundColor: level.color,
+        ])
+        attributed.append(NSAttributedString(string: label, attributes: [
+            .font: NSFont.menuFont(ofSize: NSFont.smallSystemFontSize),
+            .foregroundColor: NSColor.secondaryLabelColor,
+        ]))
+        item.attributedTitle = attributed
+        item.setAccessibilityLabel("\(label): \(percent) percent used")
+        return item
+    }
+
     private func actionItem(
         title: String,
         action: BillingAction,
@@ -743,16 +807,20 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         let active = usage.first { $0.account == (activeAccount ?? "") } ?? usage.first
         var title = "Plan usage"
         var symbol = "chart.bar"
+        // The row's icon takes the headline's colour so the state is legible
+        // before the submenu is even opened.
+        var tint: NSColor?
         if let active, let headline = active.headline, active.isOK {
             title = "Plan usage · \(headline.percent)% \(headline.name.lowercased())"
-            if headline.percent >= 80 { symbol = "chart.bar.fill" }
+            tint = headline.level.color
         } else if let active, let problem = active.problem {
             title = "Plan usage · \(problem.split(separator: "—").first?.trimmingCharacters(in: .whitespaces) ?? problem)"
             symbol = "exclamationmark.triangle.fill"
         }
 
         let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
-        item.image = menuImage(named: symbol, description: "Plan usage")
+        item.image = tint.map { tintedMenuImage(named: symbol, color: $0, description: "Plan usage") }
+            ?? menuImage(named: symbol, description: "Plan usage")
 
         let submenu = NSMenu()
         for (index, account) in usage.enumerated() {
@@ -763,10 +831,18 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
                 continue
             }
             for limit in account.limits ?? [] {
-                submenu.addItem(detailItem(title: limit.menuTitle))
+                submenu.addItem(meterItem(
+                    percent: limit.percent,
+                    level: limit.level,
+                    label: limit.detailLabel
+                ))
             }
             if let spend = account.spend {
-                submenu.addItem(detailItem(title: spend.menuTitle))
+                submenu.addItem(meterItem(
+                    percent: spend.percent,
+                    level: spend.level,
+                    label: spend.detailLabel
+                ))
             }
             if let ageNote = account.ageNote {
                 submenu.addItem(detailItem(title: ageNote))
@@ -1130,6 +1206,17 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         image.isTemplate = true
         image.accessibilityDescription = "Claude Billing \(letter)"
         return image
+    }
+
+    /// Non-template so the colour survives: menu icons are normally template
+    /// images, which AppKit recolours to match the menu.
+    private func tintedMenuImage(named name: String, color: NSColor, description: String) -> NSImage? {
+        guard let image = NSImage(systemSymbolName: name, accessibilityDescription: description) else {
+            return nil
+        }
+        let tinted = image.withSymbolConfiguration(.init(paletteColors: [color])) ?? image
+        tinted.isTemplate = false
+        return tinted
     }
 
     private func menuImage(named name: String, description: String) -> NSImage? {
