@@ -505,6 +505,217 @@ json_status_exposes_menu_bar_state() (
     "JSON status should expose registered accounts"
 )
 
+# Seeds a fake ~/.aws with one sso-session shared by two profiles, one legacy
+# profile pointing at the same start URL, and one expired session. The home
+# directory is passed in because callers run inside their own subshell.
+seed_aws_sso_fixture() {
+  aws_home=$1
+  mkdir -p "$aws_home/.aws/sso/cache"
+  cat > "$aws_home/.aws/config" <<'EOF'
+[profile dev]
+sso_session = admin-session
+sso_account_id = 111111111111
+
+[sso-session admin-session]
+sso_start_url = https://example.awsapps.com/start
+sso_region = ap-southeast-1
+
+[profile prod]
+sso_session = admin-session
+
+[sso-session other]
+sso_start_url = https://other.awsapps.com/start/
+
+[profile iam]
+sso_session = other
+
+[profile no-sso]
+region = ap-southeast-1
+
+[default]
+sso_start_url = https://example.awsapps.com/start
+EOF
+  # Token files are named after the SHA-1 of the sso-session name, exactly as
+  # the AWS CLI writes them. `orphan` shares the start URL but sits under a
+  # different key (what a renamed session leaves behind) and carries a much
+  # later expiry, so it must lose to the correctly keyed token.
+  printf '%s' '{"startUrl":"https://example.awsapps.com/start/","expiresAt":"2026-08-14T13:00:00.123Z"}' \
+    > "$aws_home/.aws/sso/cache/$(_cb_sha1 'admin-session').json"
+  printf '%s' '{"startUrl":"https://example.awsapps.com/start","expiresAt":"2031-01-01T00:00:00Z"}' \
+    > "$aws_home/.aws/sso/cache/$(_cb_sha1 'renamed-away').json"
+  printf '%s' '{"startUrl":"https://other.awsapps.com/start","expiresAt":"2026-01-01T00:00:00Z"}' \
+    > "$aws_home/.aws/sso/cache/$(_cb_sha1 'other').json"
+  printf '%s' '{"clientId":"abc"}' > "$aws_home/.aws/sso/cache/registration.json"
+  printf '%s' 'not json at all' > "$aws_home/.aws/sso/cache/broken.json"
+}
+
+sso_status_reports_expiry_for_each_session() (
+  HOME="$TEST_ROOT/sso-status"
+  export HOME
+  # shellcheck source=../claude_billing.sh
+  . "$SCRIPT"
+  seed_aws_sso_fixture "$HOME"
+  # 2026-08-14T12:00:00Z — one hour before the live token expires.
+  CLAUDE_BILLING_TEST_NOW=1786708800
+  export CLAUDE_BILLING_TEST_NOW
+
+  output=$(_cb_sso_status_json "prod")
+
+  assert_eq "admin-session,other" "$(printf '%s' "$output" | jq -r 'map(.name) | join(",")')" \
+    "sessions should be grouped by start URL and named after the sso-session block" || return 1
+  assert_eq "valid" "$(printf '%s' "$output" | jq -r '.[0].status')" \
+    "a live token should report as valid" || return 1
+  assert_eq "3600" "$(printf '%s' "$output" | jq -r '.[0].secondsRemaining')" \
+    "the token keyed to this session should win over one that only shares its URL" || return 1
+  assert_eq "default,dev,prod" "$(printf '%s' "$output" | jq -r '.[0].profiles | join(",")')" \
+    "every profile sharing the start URL should be listed" || return 1
+  assert_eq "true" "$(printf '%s' "$output" | jq -r '.[0].active')" \
+    "the session behind the current Bedrock profile should be flagged" || return 1
+  assert_eq "expired" "$(printf '%s' "$output" | jq -r '.[1].status')" \
+    "a lapsed token should report as expired" || return 1
+  assert_eq "false" "$(printf '%s' "$output" | jq -r '.[1].active')" \
+    "unrelated sessions should not be flagged as in use"
+)
+
+sso_status_ignores_a_token_orphaned_by_a_session_rename() (
+  HOME="$TEST_ROOT/sso-renamed"
+  export HOME
+  # shellcheck source=../claude_billing.sh
+  . "$SCRIPT"
+  mkdir -p "$HOME/.aws/sso/cache"
+  printf '%s\n' '[sso-session endeavourx]' 'sso_start_url = https://example.awsapps.com/start' \
+    > "$HOME/.aws/config"
+  # Left behind when the session was renamed: same portal, old lookup key. The
+  # AWS CLI would refuse to use it, so neither may we.
+  printf '%s' '{"startUrl":"https://example.awsapps.com/start","expiresAt":"2031-01-01T00:00:00Z"}' \
+    > "$HOME/.aws/sso/cache/$(_cb_sha1 'admin-session').json"
+
+  output=$(_cb_sso_status_json "")
+
+  assert_eq "signed-out" "$(printf '%s' "$output" | jq -r '.[0].status')" \
+    "a token under a former session name must not count as a live login"
+)
+
+sso_status_matches_legacy_profile_tokens_by_start_url() (
+  HOME="$TEST_ROOT/sso-legacy-key"
+  export HOME
+  # shellcheck source=../claude_billing.sh
+  . "$SCRIPT"
+  mkdir -p "$HOME/.aws/sso/cache"
+  printf '%s\n' '[profile legacy]' 'sso_start_url = https://legacy.awsapps.com/start' \
+    > "$HOME/.aws/config"
+  # Legacy profiles have no session name, so the AWS CLI keys the token on the
+  # start URL instead.
+  printf '%s' '{"startUrl":"https://legacy.awsapps.com/start","expiresAt":"2026-08-14T13:00:00Z"}' \
+    > "$HOME/.aws/sso/cache/$(_cb_sha1 'https://legacy.awsapps.com/start').json"
+  CLAUDE_BILLING_TEST_NOW=1786708800
+  export CLAUDE_BILLING_TEST_NOW
+
+  output=$(_cb_sso_status_json "legacy")
+
+  assert_eq "valid" "$(printf '%s' "$output" | jq -r '.[0].status')" \
+    "legacy profile tokens should be matched on the start URL" || return 1
+  assert_eq "profile" "$(printf '%s' "$output" | jq -r '.[0].kind')" \
+    "a legacy profile login should be reported as profile-style"
+)
+
+sso_status_reports_a_missing_token_as_signed_out() (
+  HOME="$TEST_ROOT/sso-signed-out"
+  export HOME
+  # shellcheck source=../claude_billing.sh
+  . "$SCRIPT"
+  mkdir -p "$HOME/.aws"
+  printf '%s\n' '[sso-session admin]' 'sso_start_url = https://example.awsapps.com/start' \
+    > "$HOME/.aws/config"
+
+  output=$(_cb_sso_status_json "")
+
+  assert_eq "signed-out" "$(printf '%s' "$output" | jq -r '.[0].status')" \
+    "a session with no cached token should report as signed out" || return 1
+  assert_eq "null" "$(printf '%s' "$output" | jq -r '.[0].secondsRemaining')" \
+    "an unknown expiry should stay null"
+)
+
+sso_status_is_empty_without_aws_config() (
+  HOME="$TEST_ROOT/sso-none"
+  export HOME
+  # shellcheck source=../claude_billing.sh
+  . "$SCRIPT"
+
+  assert_eq "[]" "$(_cb_sso_status_json "")" "no AWS config should yield no sessions"
+)
+
+sso_login_selects_the_matching_aws_flag() (
+  HOME="$TEST_ROOT/sso-login"
+  export HOME
+  # shellcheck source=../claude_billing.sh
+  . "$SCRIPT"
+  mkdir -p "$HOME/.aws"
+  cat > "$HOME/.aws/config" <<'EOF'
+[sso-session admin]
+sso_start_url = https://example.awsapps.com/start
+
+[default]
+sso_start_url = https://legacy.awsapps.com/start
+EOF
+  aws() { printf '%s\n' "aws $*" >> "$HOME/aws-calls"; }
+
+  claude_billing sso-login admin >/dev/null 2>&1
+  claude_billing sso-login default >/dev/null 2>&1
+  claude_billing sso-login nope >/dev/null 2>&1
+  rc=$?
+
+  assert_eq "1" "$rc" "an unknown session name should fail" || return 1
+  assert_eq "aws sso login --sso-session admin" "$(sed -n 1p "$HOME/aws-calls")" \
+    "sso-session logins should use --sso-session" || return 1
+  assert_eq "aws sso login --profile default" "$(sed -n 2p "$HOME/aws-calls")" \
+    "legacy profile logins should use --profile"
+)
+
+json_status_exposes_sso_sessions() (
+  HOME="$TEST_ROOT/json-status-sso"
+  export HOME
+  # shellcheck source=../claude_billing.sh
+  . "$SCRIPT"
+  seed_aws_sso_fixture "$HOME"
+  CLAUDE_BILLING_TEST_NOW=1786708800
+  export CLAUDE_BILLING_TEST_NOW
+
+  mkdir -p "$HOME/.claude"
+  printf '%s' \
+    '{"env":{"CLAUDE_CODE_USE_BEDROCK":"1","AWS_REGION":"us-east-1","AWS_PROFILE":"dev"}}' \
+    > "$HOME/.claude/settings.json"
+
+  output=$(claude_billing status --json)
+
+  assert_eq "admin-session" "$(printf '%s' "$output" | jq -r '.awsSso[0].name')" \
+    "JSON status should expose AWS SSO sessions for the menu bar" || return 1
+  assert_eq "true" "$(printf '%s' "$output" | jq -r '.awsSso[0].active')" \
+    "the session behind the settings AWS_PROFILE should be flagged" || return 1
+  assert_eq "expired" "$(printf '%s' "$output" | jq -r '.awsSso[1].status')" \
+    "JSON status should expose expired sessions"
+)
+
+json_status_omits_sso_when_billing_is_not_bedrock() (
+  HOME="$TEST_ROOT/json-status-sso-sub"
+  export HOME
+  # shellcheck source=../claude_billing.sh
+  . "$SCRIPT"
+  seed_aws_sso_fixture "$HOME"
+  CLAUDE_BILLING_TEST_NOW=1786708800
+  export CLAUDE_BILLING_TEST_NOW
+
+  mkdir -p "$HOME/.claude"
+  printf '%s' '{"env":{}}' > "$HOME/.claude/settings.json"
+
+  output=$(claude_billing status --json)
+
+  assert_eq "false" "$(printf '%s' "$output" | jq -r 'any(.awsSso[]; .active)')" \
+    "no session should be in use when Claude Code is not on Bedrock" || return 1
+  assert_eq "2" "$(printf '%s' "$output" | jq -r '.awsSso | length')" \
+    "sessions should still be reported outside Bedrock mode"
+)
+
 json_status_exposes_the_desktop_account() (
   HOME="$TEST_ROOT/json-status-desktop"
   export HOME
@@ -713,6 +924,22 @@ run_test "status resync uses the inherited Bedrock profile" \
   status_resync_uses_the_inherited_bedrock_profile
 run_test "JSON status exposes menu bar state" \
   json_status_exposes_menu_bar_state
+run_test "AWS SSO status reports expiry for each session" \
+  sso_status_reports_expiry_for_each_session
+run_test "AWS SSO status ignores a token orphaned by a session rename" \
+  sso_status_ignores_a_token_orphaned_by_a_session_rename
+run_test "AWS SSO status matches legacy profile tokens by start URL" \
+  sso_status_matches_legacy_profile_tokens_by_start_url
+run_test "AWS SSO status reports a missing token as signed out" \
+  sso_status_reports_a_missing_token_as_signed_out
+run_test "AWS SSO status is empty without an AWS config" \
+  sso_status_is_empty_without_aws_config
+run_test "sso-login selects the matching AWS CLI flag" \
+  sso_login_selects_the_matching_aws_flag
+run_test "JSON status exposes AWS SSO sessions" \
+  json_status_exposes_sso_sessions
+run_test "JSON status reports SSO sessions outside Bedrock mode" \
+  json_status_omits_sso_when_billing_is_not_bedrock
 run_test "JSON status exposes the Claude Desktop account" \
   json_status_exposes_the_desktop_account
 run_test "menu bar installer creates an app and launch agent" \

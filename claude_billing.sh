@@ -575,6 +575,213 @@ _cb_desktop_switch() {
   return 0
 }
 
+# --- AWS SSO session expiry ---
+# Bedrock mode authenticates through an AWS profile, and SSO profiles stop
+# working the moment their cached access token expires. The AWS CLI records
+# every token in ~/.aws/sso/cache/<sha1>.json with an `expiresAt` timestamp, so
+# expiry can be reported without any network call. Read-only: claude-billing
+# never writes to the cache, and `sso-login` just delegates to the AWS CLI.
+
+# Seam for tests: current epoch seconds.
+_cb_now() {
+  if [[ -n "${CLAUDE_BILLING_TEST_NOW:-}" ]]; then
+    printf '%s' "$CLAUDE_BILLING_TEST_NOW"
+  else
+    date +%s
+  fi
+}
+
+# Emit the SSO logins declared in ~/.aws/config as tab-separated rows:
+#   S<TAB><session name><TAB><start url>   an [sso-session <name>] block
+#   L<TAB><profile name><TAB><start url>   a legacy profile with sso_start_url
+#   P<TAB><profile name><TAB><session>     a profile that uses <session>
+_cb_sso_config_rows() {
+  local config="${AWS_CONFIG_FILE:-$HOME/.aws/config}"
+  [[ -f "$config" ]] || return 0
+  awk '
+    function trim(s) { gsub(/^[ \t\r]+|[ \t\r]+$/, "", s); return s }
+    function flush() {
+      if (kind == "sso-session") {
+        if (start_url != "") printf "S\t%s\t%s\n", name, start_url
+      } else if (kind == "profile") {
+        if (session != "") printf "P\t%s\t%s\n", name, session
+        else if (start_url != "") {
+          printf "L\t%s\t%s\n", name, start_url
+          printf "P\t%s\t%s\n", name, name
+        }
+      }
+    }
+    /^[ \t]*[#;]/ { next }
+    /^[ \t]*\[/ {
+      flush()
+      header = $0
+      sub(/^[ \t]*\[/, "", header)
+      sub(/\].*$/, "", header)
+      header = trim(header)
+      kind = ""; name = ""; start_url = ""; session = ""
+      if (header ~ /^sso-session[ \t]/) {
+        kind = "sso-session"; name = header; sub(/^sso-session[ \t]+/, "", name)
+      } else if (header ~ /^profile[ \t]/) {
+        kind = "profile"; name = header; sub(/^profile[ \t]+/, "", name)
+      } else if (header == "default") {
+        kind = "profile"; name = "default"
+      }
+      next
+    }
+    /=/ {
+      key = trim(substr($0, 1, index($0, "=") - 1))
+      val = trim(substr($0, index($0, "=") + 1))
+      if (key == "sso_start_url") start_url = val
+      else if (key == "sso_session") session = val
+    }
+    END { flush() }
+  ' "$config"
+}
+
+# The AWS CLI names each token cache file after the SHA-1 of its lookup key:
+# the sso-session name for session-style logins, the start URL for legacy
+# profiles. Matching on that key (not just the start URL) is what makes expiry
+# agree with the AWS CLI — renaming a session orphans its old token, and only
+# the key reveals that. Prints nothing when no SHA-1 tool is available.
+_cb_sha1() {
+  if command -v shasum &>/dev/null; then
+    printf '%s' "$1" | shasum -a 1 2>/dev/null | awk '{print $1}'
+  elif command -v sha1sum &>/dev/null; then
+    printf '%s' "$1" | sha1sum 2>/dev/null | awk '{print $1}'
+  elif command -v openssl &>/dev/null; then
+    printf '%s' "$1" | openssl dgst -sha1 2>/dev/null | awk '{print $NF}'
+  fi
+}
+
+# Collect [{key, url, expiresAt}] from the AWS CLI token cache, where key is the
+# file's basename (the SHA-1 above). Only access-token files carry startUrl and
+# expiresAt; role-credential and client-registration files don't.
+_cb_sso_cache_json() {
+  local dir="${HOME}/.aws/sso/cache" out f
+  local filter='[ .[] | select(type == "object" and .startUrl != null and .expiresAt != null)
+                 | {key: input_filename | split("/") | last | sub("\\.json$"; ""),
+                    url: (.startUrl | sub("/+$"; "")), expiresAt: .expiresAt} ]'
+  [[ -d "$dir" ]] || { printf '[]'; return 0; }
+  if out=$(jq -s -c "$filter" "$dir"/*.json 2>/dev/null) && [[ -n "$out" ]]; then
+    printf '%s' "$out"
+    return 0
+  fi
+  # One unreadable or malformed file must not hide every other session.
+  out=""
+  for f in "$dir"/*.json; do
+    [[ -f "$f" ]] || continue
+    out="${out}$(jq -c "[.] | $filter" "$f" 2>/dev/null || printf '[]')"
+  done
+  printf '%s' "$out" | jq -s -c 'add // []' 2>/dev/null || printf '[]'
+}
+
+# Append the expected cache key to each declared-login row, so the join can
+# prefer the exact file the AWS CLI would read.
+_cb_sso_rows_with_keys() {
+  local line kind name value
+  while IFS=$'\t' read -r kind name value; do
+    case "$kind" in
+      S) printf 'S\t%s\t%s\t%s\n' "$name" "$value" "$(_cb_sha1 "$name")" ;;
+      L) printf 'L\t%s\t%s\t%s\n' "$name" "$value" "$(_cb_sha1 "$value")" ;;
+      *) printf '%s\t%s\t%s\t\n' "$kind" "$name" "$value" ;;
+    esac
+  done
+}
+
+# Build the SSO status array. $1 is the AWS profile Claude Code currently uses
+# (may be empty), so the caller's session can be flagged in the output.
+_cb_sso_status_json() {
+  local active_profile="${1:-}" rows cache_json
+  rows=$(_cb_sso_config_rows 2>/dev/null) || rows=""
+  if [[ -z "$rows" ]]; then
+    printf '[]'
+    return 0
+  fi
+  rows=$(printf '%s\n' "$rows" | _cb_sso_rows_with_keys)
+  cache_json=$(_cb_sso_cache_json)
+  [[ -n "$cache_json" ]] || cache_json='[]'
+  # Sessions are grouped by start URL: one login serves every profile pointing
+  # at it, and an [sso-session] name is preferred over a legacy profile name.
+  # Expiry comes from the cache file the AWS CLI itself would read (matched on
+  # the SHA-1 key), falling back to the start URL when no SHA-1 tool exists.
+  jq -n -c \
+    --arg rows "$rows" \
+    --argjson cache "$cache_json" \
+    --argjson now "$(_cb_now)" \
+    --arg active_profile "$active_profile" '
+    ($rows | split("\n") | map(select(length > 0) | split("\t"))) as $r
+    | ($r | map(select(.[0] == "P")) | map({profile: .[1], session: .[2]})) as $links
+    | ($r | map(select(.[0] == "S" or .[0] == "L"))
+          | map({kind: (if .[0] == "S" then "session" else "profile" end),
+                 name: .[1], url: (.[2] | sub("/+$"; "")),
+                 cacheKey: (.[3] // "")})) as $declared
+    | $declared
+    | group_by(.url)
+    | map(
+        (map(select(.kind == "session")) | first) as $preferred
+        | (if $preferred != null then $preferred else first end) as $self
+        | (map(.name) | unique) as $names
+        | ($links | map(select(.session as $s | $names | index($s)) | .profile) | unique) as $profiles
+        | (if $self.cacheKey != ""
+           then ($cache | map(select(.key == $self.cacheKey) | .expiresAt))
+           else ($cache | map(select(.url == $self.url) | .expiresAt)) end
+           | sort | last) as $expires
+        | ($expires
+           | if . == null then null
+             else (try (sub("\\.[0-9]+"; "") | fromdateiso8601) catch null) end) as $epoch
+        | (if $epoch == null then null else ($epoch - $now) end) as $remaining
+        | {
+            name: $self.name,
+            kind: $self.kind,
+            startUrl: $self.url,
+            profiles: $profiles,
+            expiresAt: $expires,
+            secondsRemaining: $remaining,
+            status: (if $remaining == null then "signed-out"
+                     elif $remaining <= 0 then "expired"
+                     elif $remaining <= 1800 then "expiring"
+                     else "valid" end),
+            active: ($active_profile != "" and ($profiles | index($active_profile)) != null)
+          }
+      )
+    | sort_by(.name)'
+}
+
+_cb_sso_status_lines() {
+  printf '%s' "$1" | jq -r '
+    def human:
+      if . == null then "unknown"
+      elif . >= 86400 then "\(. / 86400 | floor)d \((. % 86400) / 3600 | floor)h"
+      elif . >= 3600 then "\(. / 3600 | floor)h \((. % 3600) / 60 | floor)m"
+      elif . > 0 then "\(. / 60 | floor)m"
+      else "0m" end;
+    .[] |
+    "  \(.name)\(if .active then " (in use)" else "" end): " +
+    (if .status == "signed-out" then "signed out — run: claude-billing sso-login \(.name)"
+     elif .status == "expired" then "expired — run: claude-billing sso-login \(.name)"
+     elif .status == "expiring" then "expires in \(.secondsRemaining | human) — refresh soon"
+     else "valid for \(.secondsRemaining | human)" end)'
+}
+
+# Refresh one SSO login through the AWS CLI. Session-style logins take
+# --sso-session; legacy profiles that carry their own sso_start_url take
+# --profile.
+_claude_billing_sso_login() {
+  local name="$1" kind
+  _cb_require_cmd jq "install with: brew install jq / apt install jq / winget install jqlang.jq" || return 1
+  _cb_require_cmd aws "install the AWS CLI first" || return 1
+  kind=$(_cb_sso_status_json "" | jq -r --arg name "$name" '.[] | select(.name == $name) | .kind' 2>/dev/null)
+  if [[ -z "$kind" ]]; then
+    echo "claude-billing: no AWS SSO session named '$name' in ${AWS_CONFIG_FILE:-$HOME/.aws/config}" >&2
+    return 1
+  fi
+  if [[ "$kind" == "session" ]]; then
+    aws sso login --sso-session "$name"
+  else
+    aws sso login --profile "$name"
+  fi
+}
+
 _claude_billing_login() {
   if ! command -v claude &>/dev/null; then
     echo "claude CLI not found in PATH — run 'claude auth login --claudeai' once it is installed"
@@ -880,7 +1087,15 @@ claude_billing() {
       local inherited_profile="${AWS_PROFILE:-default}"
       local json_status mode desktop_available="false"
       _cb_desktop_available && desktop_available="true"
+      local active_aws_profile sso_json
+      active_aws_profile=$(jq -r --arg inherited "$inherited_profile" '
+        .env as $e |
+        if ($e.CLAUDE_CODE_USE_BEDROCK // "") != "" then
+          (if ($e.AWS_PROFILE // "") != "" then $e.AWS_PROFILE else $inherited end)
+        else "" end' "$settings" 2>/dev/null) || active_aws_profile=""
+      sso_json=$(_cb_sso_status_json "$active_aws_profile") || sso_json='[]'
       json_status=$(jq -c \
+        --argjson aws_sso "$sso_json" \
         --arg accounts "$(_cb_accounts_list)" \
         --arg active "$(_cb_active_get)" \
         --arg desktop_account "$(_cb_desktop_owner_get)" \
@@ -907,6 +1122,7 @@ claude_billing() {
         end |
         . + {
           accounts: ($accounts | split(" ") | map(select(length > 0))),
+          awsSso: $aws_sso,
           desktop: {
             available: ($desktop_available == "true"),
             account: (if $desktop_account != "" then $desktop_account else null end)
@@ -935,11 +1151,40 @@ claude_billing() {
           "Current: claude.ai subscription" +
             (if $active != "" then " (account: \($active))" else "" end)
         end' "$settings"
+      if [[ "$sso_json" != "[]" ]]; then
+        echo "AWS SSO sessions:"
+        _cb_sso_status_lines "$sso_json"
+      fi
       if _cb_desktop_available; then
         local desk_owner
         desk_owner=$(_cb_desktop_owner_get)
         echo "Desktop (Claude.app): ${desk_owner:-unknown account}"
       fi
+      ;;
+
+    sso)
+      _cb_require_cmd jq "install with: brew install jq / apt install jq / winget install jqlang.jq" || return 1
+      local sso_only
+      sso_only=$(_cb_sso_status_json "") || return 1
+      if [[ "$sso_only" == "[]" ]]; then
+        echo "No AWS SSO logins configured in ${AWS_CONFIG_FILE:-$HOME/.aws/config}"
+        return 0
+      fi
+      if [[ "${2:-}" == "--json" ]]; then
+        printf '%s\n' "$sso_only"
+        return 0
+      fi
+      echo "AWS SSO sessions:"
+      _cb_sso_status_lines "$sso_only"
+      ;;
+
+    sso-login)
+      if [[ -z "${2:-}" ]]; then
+        echo "Usage: claude-billing sso-login <session>"
+        echo "Run 'claude-billing sso' to list AWS SSO sessions."
+        return 1
+      fi
+      _claude_billing_sso_login "$2"
       ;;
 
     menubar)
@@ -1012,6 +1257,8 @@ claude_billing() {
       echo "  accounts               List registered subscription accounts"
       echo "  add-account <name>     Register a claude.ai subscription account"
       echo "  remove-account <name>  Remove an account and its stored token"
+      echo "  sso [--json]           Show AWS SSO session expiry for Bedrock profiles"
+      echo "  sso-login <session>    Refresh an expired AWS SSO login"
       echo "  desktop [name]         Show or switch the Claude.app desktop login (macOS)"
       echo "  menubar <action>       Install or uninstall the menu bar app (macOS)"
       echo "  config                 Reconfigure Bedrock region, models, and AWS profile"

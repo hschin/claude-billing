@@ -7,6 +7,63 @@ struct DesktopState: Decodable, Equatable {
     let account: String?
 }
 
+/// One AWS SSO login from ~/.aws/config, paired with the expiry of its cached
+/// access token. Bedrock profiles stop working once this expires, so the menu
+/// surfaces it; the CLI owns all of the parsing and expiry maths.
+struct SSOSessionState: Decodable, Equatable {
+    let name: String
+    let profiles: [String]
+    let expiresAt: String?
+    let secondsRemaining: Int?
+    let status: String
+    let active: Bool
+
+    var needsRefresh: Bool {
+        status == "expired" || status == "signed-out"
+    }
+
+    var symbolName: String {
+        switch status {
+        case "valid": return "checkmark.circle"
+        case "expiring": return "clock.badge.exclamationmark"
+        default: return "exclamationmark.triangle.fill"
+        }
+    }
+
+    var detail: String {
+        switch status {
+        case "signed-out": return "signed out"
+        case "expired": return "expired"
+        case "expiring": return "expires in \(SSOSessionState.humanized(secondsRemaining))"
+        case "valid": return "valid for \(SSOSessionState.humanized(secondsRemaining))"
+        default: return status
+        }
+    }
+
+    var menuTitle: String {
+        "\(name)\(active ? " (in use)" : "") · \(detail)"
+    }
+
+    /// The AWS profiles this one login covers — the only part of a session that
+    /// says which AWS accounts it actually reaches.
+    var profileSummary: String {
+        guard !profiles.isEmpty else { return "no profiles use this session" }
+        let shown = profiles.prefix(5).joined(separator: ", ")
+        let extra = profiles.count - min(profiles.count, 5)
+        return extra > 0 ? "\(shown) +\(extra) more" : shown
+    }
+
+    static func humanized(_ seconds: Int?) -> String {
+        guard let seconds, seconds > 0 else { return "unknown" }
+        let days = seconds / 86_400
+        let hours = (seconds % 86_400) / 3_600
+        let minutes = (seconds % 3_600) / 60
+        if days > 0 { return "\(days)d \(hours)h" }
+        if hours > 0 { return "\(hours)h \(minutes)m" }
+        return "\(minutes)m"
+    }
+}
+
 struct BillingState: Decodable, Equatable {
     let mode: String
     let kind: String
@@ -14,6 +71,18 @@ struct BillingState: Decodable, Equatable {
     let awsProfile: String?
     let accounts: [String]
     let desktop: DesktopState?
+    let awsSso: [SSOSessionState]?
+
+    var ssoSessions: [SSOSessionState] { awsSso ?? [] }
+
+    /// The SSO sessions live in a submenu, so the row that opens it carries the
+    /// count of stale logins — otherwise nothing would look like it needed a
+    /// refresh until you went looking.
+    var ssoMenuTitle: String {
+        let stale = ssoSessions.filter(\.needsRefresh).count
+        guard stale > 0 else { return "AWS SSO sessions" }
+        return "AWS SSO · \(stale) login\(stale == 1 ? "" : "s") to refresh"
+    }
 
     var statusIconLetter: String {
         switch kind {
@@ -108,6 +177,7 @@ enum ManagementCommand: Equatable {
     case configureBedrock
     case updateAPIKey
     case login
+    case ssoLogin(String)
 
     var arguments: [String] {
         switch self {
@@ -121,11 +191,15 @@ enum ManagementCommand: Equatable {
             return ["add-key"]
         case .login:
             return ["login"]
+        case let .ssoLogin(session):
+            return ["sso-login", session]
         }
     }
 
     var progressDescription: String {
         switch self {
+        case let .ssoLogin(session):
+            return "Refreshing the AWS SSO login for \(session)"
         case let .removeAccount(account):
             return "Removing account \(account)"
         case let .addAccount(account):
@@ -151,6 +225,8 @@ enum ManagementCommand: Equatable {
             return "Couldn’t Open API Key Setup"
         case .login:
             return "Couldn’t Open Claude.ai Login"
+        case .ssoLogin:
+            return "Couldn’t Start the AWS SSO Login"
         }
     }
 }
@@ -397,14 +473,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
 
+            // Bedrock and the API key are separate providers, so they get their
+            // own sections rather than one "other billing" bucket. Bedrock
+            // leads because it carries the SSO sessions and sees more use.
             menu.addItem(.separator())
-            menu.addItem(sectionItem(title: "Other CLI billing"))
-            menu.addItem(actionItem(
-                title: "Anthropic API",
-                action: .api,
-                isCurrent: currentState.kind == "api",
-                symbolName: "key"
-            ))
             let bedrockTitle = currentState.kind == "bedrock"
                 ? "AWS Bedrock · \(currentState.awsProfile ?? "default")"
                 : "AWS Bedrock"
@@ -413,6 +485,17 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
                 action: .bedrock,
                 isCurrent: currentState.kind == "bedrock",
                 symbolName: "cloud"
+            ))
+            if !currentState.ssoSessions.isEmpty {
+                menu.addItem(ssoMenuItem(for: currentState))
+            }
+
+            menu.addItem(.separator())
+            menu.addItem(actionItem(
+                title: "Anthropic API",
+                action: .api,
+                isCurrent: currentState.kind == "api",
+                symbolName: "key"
             ))
             menu.addItem(.separator())
 
@@ -482,6 +565,41 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         item.image = menuImage(named: symbolName, description: title)
         item.state = isCurrent ? .on : .off
         item.isEnabled = !isCurrent && !isSwitching
+        return item
+    }
+
+    /// AWS SSO expiry sits in its own submenu so the Bedrock row stays a
+    /// one-click switch — AppKit ignores the action of an item that owns a
+    /// submenu. Each session lists the AWS profiles it signs in, because the
+    /// session name is just a label from ~/.aws/config and says nothing about
+    /// which accounts it covers.
+    private func ssoMenuItem(for state: BillingState) -> NSMenuItem {
+        let needsRefresh = state.ssoSessions.contains(where: \.needsRefresh)
+        let item = NSMenuItem(title: state.ssoMenuTitle, action: nil, keyEquivalent: "")
+        item.image = menuImage(
+            named: needsRefresh ? "exclamationmark.triangle.fill" : "clock.arrow.circlepath",
+            description: state.ssoMenuTitle
+        )
+
+        let submenu = NSMenu()
+        for (index, session) in state.ssoSessions.enumerated() {
+            if index > 0 { submenu.addItem(.separator()) }
+            let sessionItem = NSMenuItem(
+                title: "\(session.menuTitle)…",
+                action: #selector(ssoLoginClicked(_:)),
+                keyEquivalent: ""
+            )
+            sessionItem.target = self
+            sessionItem.representedObject = session.name
+            sessionItem.image = menuImage(named: session.symbolName, description: session.detail)
+            sessionItem.toolTip = "Sign in to this AWS SSO portal again in Terminal."
+            sessionItem.isEnabled = !isSwitching
+            submenu.addItem(sessionItem)
+            submenu.addItem(sectionItem(title: "    \(session.profileSummary)"))
+        }
+        submenu.addItem(.separator())
+        submenu.addItem(sectionItem(title: "One login per SSO portal, shared by its profiles"))
+        item.submenu = submenu
         return item
     }
 
@@ -640,6 +758,14 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func loginClicked() {
         openInTerminal(.login)
+    }
+
+    // `aws sso login` opens a browser and waits for approval, so it belongs in
+    // Terminal like the other interactive flows rather than in a blocking
+    // in-app process.
+    @objc private func ssoLoginClicked(_ sender: NSMenuItem) {
+        guard let session = sender.representedObject as? String, !isSwitching else { return }
+        openInTerminal(.ssoLogin(session))
     }
 
     private func openInTerminal(_ command: ManagementCommand) {
