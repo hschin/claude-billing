@@ -944,7 +944,7 @@ _cb_usage_lines() {
          else "" end) ),
       ( if .spend != null then
           (.spend.currency | symbol) as $sym |
-          "    Usage credits: \(.spend.percent)% used — \($sym)\(([.spend.limit - .spend.used, 0] | max) | money) left of \($sym)\(.spend.limit | money)"
+          "    Usage credits: \(.spend.percent)% used — \($sym)\(.spend.used | money) of \($sym)\(.spend.limit | money)"
         else empty end ),
       ( if (.ageSeconds // 0) > 60 then
           "    (cached \((.ageSeconds / 60) | floor) min ago\(if .staleReason != null then ": \(.staleReason)" else "" end))"
