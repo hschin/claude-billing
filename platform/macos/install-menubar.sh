@@ -106,7 +106,18 @@ cat > "$LAUNCH_AGENT" <<EOF
 EOF
 
 launchctl bootout "gui/$(id -u)/$LAUNCH_LABEL" 2>/dev/null || true
-launchctl bootstrap "gui/$(id -u)" "$LAUNCH_AGENT"
+# bootout is asynchronous: bootstrapping while the old service is still being
+# torn down fails with "Input/output error" (5), so retry briefly.
+bootstrap_attempt=1
+until launchctl bootstrap "gui/$(id -u)" "$LAUNCH_AGENT" 2>/dev/null; do
+  if [[ "$bootstrap_attempt" -ge 10 ]]; then
+    # Surface the real launchctl error on the final attempt.
+    launchctl bootstrap "gui/$(id -u)" "$LAUNCH_AGENT"
+    break
+  fi
+  bootstrap_attempt=$((bootstrap_attempt + 1))
+  sleep 1
+done
 
 echo "Installed Claude Billing in the menu bar. It will start automatically when you log in."
 echo "Uninstall only the menu bar app with:"
