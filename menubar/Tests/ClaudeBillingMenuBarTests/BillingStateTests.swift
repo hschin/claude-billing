@@ -206,7 +206,7 @@ final class BillingStateTests: XCTestCase {
         XCTAssertEqual(usage[0].headline?.percent, 72)
         XCTAssertEqual(usage[0].limits?[0].detailLabel, "5-hour session")
         XCTAssertEqual(usage[0].limits?[1].name, "Weekly · all models")
-        XCTAssertEqual(usage[0].spend?.detailLabel, "Extra usage credits · USD 17.20 of 20.00")
+        XCTAssertEqual(usage[0].spend?.detailLabel, "Usage credits · $2.80 left of $20.00")
         XCTAssertNil(usage[0].problem)
         XCTAssertEqual(usage[1].problem, "token expired — switch to this account to refresh")
         XCTAssertFalse(usage[1].isOK)
@@ -258,6 +258,20 @@ final class BillingStateTests: XCTestCase {
         // Template images get recoloured by AppKit, which would lose the colour.
         XCTAssertFalse(image.isTemplate)
         XCTAssertEqual(image.accessibilityDescription, "42 percent used")
+    }
+
+    func testUsageCreditsShowWhatIsLeftWithACurrencySymbol() {
+        func spend(_ used: Double, _ limit: Double, _ currency: String) -> UsageSpend {
+            UsageSpend(percent: 50, used: used, limit: limit, currency: currency, severity: "normal")
+        }
+
+        XCTAssertEqual(spend(17.2, 20, "USD").remaining, 2.8, accuracy: 0.001)
+        XCTAssertEqual(spend(17.2, 20, "USD").detailLabel, "Usage credits · $2.80 left of $20.00")
+        XCTAssertEqual(spend(5, 40, "GBP").detailLabel, "Usage credits · £35.00 left of £40.00")
+        // An unknown currency keeps its code rather than guessing a glyph.
+        XCTAssertEqual(spend(1, 10, "SGD").detailLabel, "Usage credits · SGD 9.00 left of SGD 10.00")
+        // Overspend must not render as a negative balance.
+        XCTAssertEqual(spend(25, 20, "USD").remaining, 0)
     }
 
     func testUsageBarAttachmentCarriesTheBarInline() {

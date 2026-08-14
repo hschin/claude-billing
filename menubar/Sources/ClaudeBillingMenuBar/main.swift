@@ -197,8 +197,28 @@ struct UsageSpend: Decodable, Equatable {
 
     var level: UsageLevel { UsageLevel(percent: percent) }
 
+    /// What's left of the monthly credit cap. The endpoint reports only spent
+    /// and cap, so this is derived — and phrased as "left" rather than
+    /// "balance", because it's headroom under a cap, not a prepaid pot.
+    var remaining: Double { max(limit - used, 0) }
+
+    /// Symbols for the currencies Claude bills in; anything else keeps its code
+    /// rather than guessing a glyph.
+    var currencySymbol: String {
+        switch currency.uppercased() {
+        case "USD": return "$"
+        case "EUR": return "€"
+        case "GBP": return "£"
+        case "JPY": return "¥"
+        default: return "\(currency) "
+        }
+    }
+
     var detailLabel: String {
-        String(format: "Extra usage credits · %@ %.2f of %.2f", currency, used, limit)
+        String(
+            format: "Usage credits · %@%.2f left of %@%.2f",
+            currencySymbol, remaining, currencySymbol, limit
+        )
     }
 }
 

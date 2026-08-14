@@ -925,6 +925,8 @@ _cb_usage_lines() {
   printf '%s' "$1" | jq -r '
     def money: (. * 100 | round) as $c
       | "\($c / 100 | floor).\(if ($c % 100) < 10 then "0" else "" end)\($c % 100)";
+    # Symbols for the currencies Claude bills in; anything else keeps its code.
+    def symbol: {"USD": "$", "EUR": "\u20ac", "GBP": "\u00a3", "JPY": "\u00a5"}[. // ""] // "\(.) ";
     def limit_name:
       if . == "session" then "5-hour session"
       elif . == "weekly_all" then "Weekly (all models)"
@@ -938,7 +940,8 @@ _cb_usage_lines() {
       ( .limits[] | "    \(.kind | limit_name): \(.percent)%" +
         (if .resetsAt != null then " — resets \(.resetsAt | sub("\\..*$"; "") | sub("T"; " ") + " UTC")" else "" end) ),
       ( if .spend != null then
-          "    Extra usage credits: \(.spend.percent)% (\(.spend.currency) \(.spend.used | money) of \(.spend.limit | money))"
+          (.spend.currency | symbol) as $sym |
+          "    Usage credits: \(.spend.percent)% used — \($sym)\(([.spend.limit - .spend.used, 0] | max) | money) left of \($sym)\(.spend.limit | money)"
         else empty end ),
       ( if (.ageSeconds // 0) > 60 then
           "    (cached \((.ageSeconds / 60) | floor) min ago\(if .staleReason != null then ": \(.staleReason)" else "" end))"
