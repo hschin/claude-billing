@@ -265,9 +265,9 @@ final class BillingStateTests: XCTestCase {
             try JSONDecoder().decode(UsageLimit.self, from: Data(json.utf8))
         }
 
-        // An idle 5-hour window has no reset time; don't imply a deadline.
+        // An unstarted 5-hour window has no reset time; don't imply a deadline.
         let idle = try limit(#"{"kind":"session","percent":0,"severity":"normal","resetsAt":null,"isActive":false}"#)
-        XCTAssertEqual(idle.detailLabel, "5-hour session · no active window")
+        XCTAssertEqual(idle.detailLabel, "5-hour session · not started")
 
         // An open window reports when it clears, in local time.
         let open = try limit(#"{"kind":"session","percent":72,"severity":"warning","resetsAt":"2026-08-14T13:00:00.000000+00:00","isActive":true}"#)

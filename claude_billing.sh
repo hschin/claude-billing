@@ -940,7 +940,7 @@ _cb_usage_lines() {
       ( .limits[] | "    \(.kind | limit_name): \(.percent)%" +
         (if .resetsAt != null then " — resets \(.resetsAt | sub("\\..*$"; "") | sub("T"; " ") + " UTC")"
          # A 5-hour window has no reset time until it starts.
-         elif .kind == "session" and (.isActive | not) then " — no active window"
+         elif .kind == "session" and (.isActive | not) then " — not started"
          else "" end) ),
       ( if .spend != null then
           (.spend.currency | symbol) as $sym |

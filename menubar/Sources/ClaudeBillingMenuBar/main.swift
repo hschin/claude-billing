@@ -181,10 +181,10 @@ struct UsageLimit: Decodable, Equatable {
     var level: UsageLevel { UsageLevel(percent: percent) }
 
     /// When the limit clears. A 5-hour window only has a reset time once it has
-    /// started, so an idle one says so rather than implying a deadline.
+    /// started, so an unstarted one says so rather than implying a deadline.
     var statusSuffix: String {
         if let resetDescription { return " · resets \(resetDescription)" }
-        if kind == "session", !isActive { return " · no active window" }
+        if kind == "session", !isActive { return " · not started" }
         return ""
     }
 
