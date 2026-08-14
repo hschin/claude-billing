@@ -204,7 +204,7 @@ final class BillingStateTests: XCTestCase {
 
         XCTAssertEqual(usage[0].headline?.kind, "session")
         XCTAssertEqual(usage[0].headline?.percent, 72)
-        XCTAssertEqual(usage[0].limits?[0].detailLabel, "5-hour session")
+        XCTAssertEqual(usage[0].limits?[0].detailLabel, "5-hour session")  // isActive true, no reset reported
         XCTAssertEqual(usage[0].limits?[1].name, "Weekly · all models")
         XCTAssertEqual(usage[0].spend?.detailLabel, "Usage credits · $2.80 left of $20.00")
         XCTAssertNil(usage[0].problem)
@@ -258,6 +258,25 @@ final class BillingStateTests: XCTestCase {
         // Template images get recoloured by AppKit, which would lose the colour.
         XCTAssertFalse(image.isTemplate)
         XCTAssertEqual(image.accessibilityDescription, "42 percent used")
+    }
+
+    func testSessionLimitReportsItsResetOrSaysThereIsNoWindow() throws {
+        func limit(_ json: String) throws -> UsageLimit {
+            try JSONDecoder().decode(UsageLimit.self, from: Data(json.utf8))
+        }
+
+        // An idle 5-hour window has no reset time; don't imply a deadline.
+        let idle = try limit(#"{"kind":"session","percent":0,"severity":"normal","resetsAt":null,"isActive":false}"#)
+        XCTAssertEqual(idle.detailLabel, "5-hour session · no active window")
+
+        // An open window reports when it clears, in local time.
+        let open = try limit(#"{"kind":"session","percent":72,"severity":"warning","resetsAt":"2026-08-14T13:00:00.000000+00:00","isActive":true}"#)
+        XCTAssertNotNil(open.resetDescription)
+        XCTAssertTrue(open.detailLabel.hasPrefix("5-hour session · resets "))
+
+        // Other limits stay silent rather than borrowing the session wording.
+        let weekly = try limit(#"{"kind":"weekly_opus","percent":10,"severity":"normal","resetsAt":null,"isActive":false}"#)
+        XCTAssertEqual(weekly.detailLabel, "Weekly · Opus")
     }
 
     func testUsageCreditsShowWhatIsLeftWithACurrencySymbol() {

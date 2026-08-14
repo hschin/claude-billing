@@ -938,7 +938,10 @@ _cb_usage_lines() {
     if .status == "ok" then
       $head,
       ( .limits[] | "    \(.kind | limit_name): \(.percent)%" +
-        (if .resetsAt != null then " — resets \(.resetsAt | sub("\\..*$"; "") | sub("T"; " ") + " UTC")" else "" end) ),
+        (if .resetsAt != null then " — resets \(.resetsAt | sub("\\..*$"; "") | sub("T"; " ") + " UTC")"
+         # A 5-hour window has no reset time until it starts.
+         elif .kind == "session" and (.isActive | not) then " — no active window"
+         else "" end) ),
       ( if .spend != null then
           (.spend.currency | symbol) as $sym |
           "    Usage credits: \(.spend.percent)% used — \($sym)\(([.spend.limit - .spend.used, 0] | max) | money) left of \($sym)\(.spend.limit | money)"

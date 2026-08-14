@@ -180,12 +180,17 @@ struct UsageLimit: Decodable, Equatable {
 
     var level: UsageLevel { UsageLevel(percent: percent) }
 
+    /// When the limit clears. A 5-hour window only has a reset time once it has
+    /// started, so an idle one says so rather than implying a deadline.
+    var statusSuffix: String {
+        if let resetDescription { return " · resets \(resetDescription)" }
+        if kind == "session", !isActive { return " · no active window" }
+        return ""
+    }
+
     /// The bar and percentage carry the number, so the label only has to say
     /// which limit it is and when it clears.
-    var detailLabel: String {
-        let reset = resetDescription.map { " · resets \($0)" } ?? ""
-        return "\(name)\(reset)"
-    }
+    var detailLabel: String { "\(name)\(statusSuffix)" }
 }
 
 struct UsageSpend: Decodable, Equatable {
@@ -880,7 +885,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         // The bar carries the headline number; which limit it is, and when it
         // clears, belong on hover rather than in the row.
         if let active, let headline = active.headline, active.isOK {
-            let text = "Plan usage · \(headline.percent)%  "
+            // The reset time earns its place in the row: it says how long you'd
+            // have to wait, which the bar alone can't.
+            let text = "Plan usage · \(headline.percent)%\(headline.statusSuffix)  "
             item.title = text
             // Keep the shared icon column, and trail the bar after the text so
             // this row's label lines up with every other row's.
