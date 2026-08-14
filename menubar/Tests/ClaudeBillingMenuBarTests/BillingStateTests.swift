@@ -218,7 +218,7 @@ final class BillingStateTests: XCTestCase {
         }
         func account(_ limits: [UsageLimit]) -> UsageAccount {
             UsageAccount(
-                account: "work", status: "ok", limits: limits, spend: nil,
+                account: "work", status: "ok", limits: limits, spend: nil, credits: nil,
                 ageSeconds: nil, staleReason: nil, detail: nil
             )
         }
@@ -279,6 +279,20 @@ final class BillingStateTests: XCTestCase {
         XCTAssertEqual(weekly.detailLabel, "Weekly · Opus")
     }
 
+    func testCreditBalanceReportsTheSoonestExpiry() throws {
+        let credits = try JSONDecoder().decode(UsageCredits.self, from: Data(#"""
+        {"balance":88.71,"currency":"USD","nextExpiresAt":"2026-09-19T00:00:00Z","expiringAmount":82.79}
+        """#.utf8))
+
+        XCTAssertEqual(credits.balanceText, "$88.71")
+        XCTAssertEqual(credits.detailLabel, "Credit balance · $88.71 · $82.79 expires 19 Sep")
+
+        // No expiry reported: show the balance alone rather than a bare date.
+        let undated = UsageCredits(balance: 5, currency: "USD", nextExpiresAt: nil, expiringAmount: nil)
+        XCTAssertNil(undated.expiryNote)
+        XCTAssertEqual(undated.detailLabel, "Credit balance · $5.00")
+    }
+
     func testUsageCreditsShowSpendWithACurrencySymbol() {
         func spend(_ used: Double, _ limit: Double, _ currency: String) -> UsageSpend {
             UsageSpend(percent: 50, used: used, limit: limit, currency: currency, severity: "normal")
@@ -313,7 +327,7 @@ final class BillingStateTests: XCTestCase {
 
     func testUsageFailuresNeverReadAsZeroPercent() {
         let unavailable = UsageAccount(
-            account: "work", status: "unavailable", limits: nil, spend: nil,
+            account: "work", status: "unavailable", limits: nil, spend: nil, credits: nil,
             ageSeconds: nil, staleReason: nil, detail: "could not reach api.anthropic.com"
         )
 
@@ -324,7 +338,7 @@ final class BillingStateTests: XCTestCase {
     func testUsageAgeNoteAppearsOnlyOnceFiguresAreStale() {
         func account(age: Int?, reason: String? = nil) -> UsageAccount {
             UsageAccount(
-                account: "work", status: "ok", limits: [], spend: nil,
+                account: "work", status: "ok", limits: [], spend: nil, credits: nil,
                 ageSeconds: age, staleReason: reason, detail: nil
             )
         }

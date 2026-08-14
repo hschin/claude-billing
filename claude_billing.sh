@@ -798,6 +798,10 @@ _claude_billing_sso_login() {
 # because process arguments are visible to other users via ps.
 
 _CB_USAGE_ENDPOINT="https://api.anthropic.com/api/oauth/usage"
+# Built by concatenation, not pattern substitution: zsh parses `${var//%s/x}`
+# as an end-anchored replacement of "s" and silently corrupts the URL.
+_CB_CREDITS_ENDPOINT_PREFIX="https://api.anthropic.com/api/oauth/organizations/"
+_CB_CREDITS_ENDPOINT_SUFFIX="/prepaid/credits"
 _CB_USAGE_BETA="oauth-2025-04-20"
 
 _cb_usage_cache_file() {
@@ -814,6 +818,55 @@ _cb_usage_credentials() {
     return 0
   fi
   _cb_cred_retrieve "$(_cb_acct_service "$name")"
+}
+
+# The organization UUID needed for the prepaid-credits endpoint. Claude Code
+# keeps the live account's identity in ~/.claude.json; inactive accounts have
+# theirs stashed alongside their token.
+_cb_usage_org_uuid() {
+  local name="${1:-}" active
+  active=$(_cb_active_get)
+  if [[ -z "$name" || "$name" == "$active" ]]; then
+    jq -r '.oauthAccount.organizationUuid // empty' "$HOME/.claude.json" 2>/dev/null
+    return 0
+  fi
+  _cb_cred_retrieve "$(_cb_acct_meta_service "$name")" | jq -r '.organizationUuid // empty' 2>/dev/null
+}
+
+# Prepaid credit balance for one account, or nothing at all. Credits are a
+# separate concern from plan limits and a separate request, so a failure here
+# (not every account has credits, and the endpoint may refuse) leaves the usage
+# figures intact rather than failing the whole read.
+_cb_credits_fetch_one() {
+  local token="$1" org="$2" response http_status body url
+  [[ -n "$org" ]] || return 0
+  url="${_CB_CREDITS_ENDPOINT_PREFIX}${org}${_CB_CREDITS_ENDPOINT_SUFFIX}"
+  response=$(printf '%s\n' \
+    "header = \"Authorization: Bearer $token\"" \
+    "header = \"anthropic-beta: $_CB_USAGE_BETA\"" \
+    "header = \"User-Agent: claude-billing/$_CB_VERSION\"" \
+    "silent" "show-error" "max-time = 20" "write-out = \"\\n%{http_code}\"" \
+    "url = \"$url\"" | curl --config - 2>/dev/null)
+  http_status=$(printf '%s' "$response" | tail -n 1)
+  body=$(printf '%s' "$response" | sed '$d')
+  [[ "$http_status" == "200" && -n "$body" ]] || return 0
+  # Balances are minor units with an exponent; tranches carry their own expiry,
+  # and the soonest one is what a holder needs to know about.
+  printf '%s' "$body" | jq -c '
+    ((.balance.credits.exponent // 2) | if type == "number" then . else 2 end) as $exp
+    | (.balance.credits.amount_minor // .amount) as $minor
+    | select($minor != null and ($minor | type) == "number")
+    | ((.tranches // []) + (.promo_tranches // [])) as $tranches
+    | (.next_expires_at // ($tranches | map(.expires_at) | map(select(. != null)) | sort | first)) as $next
+    | {
+        balance: ($minor / pow(10; $exp)),
+        currency: (.currency // "USD"),
+        nextExpiresAt: $next,
+        expiringAmount: ($tranches
+          | map(select(.expires_at == $next and .remaining_amount_minor_units != null))
+          | map(.remaining_amount_minor_units) | add
+          | if . == null then null else . / pow(10; $exp) end)
+      }' 2>/dev/null || return 0
 }
 
 # Fetch usage for one account. Always prints one JSON object; status is ok,
@@ -852,7 +905,11 @@ _cb_usage_fetch_one() {
                  else "api.anthropic.com returned HTTP \($code)" end)}'
     return 0
   fi
-  printf '%s' "$body" | jq -c --arg account "$name" --argjson fetched "$(_cb_now)" '
+  local credits
+  credits=$(_cb_credits_fetch_one "$token" "$(_cb_usage_org_uuid "$name")")
+  [[ -n "$credits" ]] || credits="null"
+  printf '%s' "$body" | jq -c --arg account "$name" --argjson fetched "$(_cb_now)" \
+    --argjson credits "$credits" '
     {
       account: $account,
       status: "ok",
@@ -863,6 +920,7 @@ _cb_usage_fetch_one() {
                    percent: (.percent | if type == "number" then round else 0 end),
                    severity: (.severity // "normal"),
                    resetsAt: .resets_at, isActive: (.is_active // false)} ],
+      credits: $credits,
       spend: (if (.spend | type) == "object" and (.spend.enabled // false)
               then {percent: (.spend.percent // 0),
                     used: ((.spend.used.amount_minor // 0) / (pow(10; .spend.used.exponent // 2))),
@@ -942,6 +1000,13 @@ _cb_usage_lines() {
          # A 5-hour window has no reset time until it starts.
          elif .kind == "session" and (.isActive | not) then " — not started"
          else "" end) ),
+      ( if .credits != null then
+          (.credits.currency | symbol) as $csym |
+          "    Credit balance: \($csym)\(.credits.balance | money)" +
+          (if .credits.expiringAmount != null and .credits.nextExpiresAt != null
+           then " — \($csym)\(.credits.expiringAmount | money) expires \(.credits.nextExpiresAt | sub("T.*$"; ""))"
+           else "" end)
+        else empty end ),
       ( if .spend != null then
           (.spend.currency | symbol) as $sym |
           "    Usage credits: \(.spend.percent)% used — \($sym)\(.spend.used | money) of \($sym)\(.spend.limit | money)"

@@ -593,6 +593,116 @@ usage_reports_limits_for_each_account() (
     "the usage cache must not be world-readable"
 )
 
+usage_reports_the_prepaid_credit_balance() (
+  HOME="$TEST_ROOT/usage-credits"
+  export HOME
+  # shellcheck source=../claude_billing.sh
+  . "$SCRIPT"
+  _CB_PLATFORM="windows"
+  mkdir -p "$HOME"
+  CLAUDE_BILLING_TEST_NOW=1786708800
+  export CLAUDE_BILLING_TEST_NOW
+  _cb_cred_store "Claude Code-credentials" \
+    '{"claudeAiOauth":{"accessToken":"live-token","expiresAt":1786712400000}}'
+  # The credits endpoint is per organization, so it needs the account identity.
+  printf '%s' '{"oauthAccount":{"organizationUuid":"org-uuid-1"}}' > "$HOME/.claude.json"
+  curl() {
+    config=$(cat)
+    case "$config" in
+      *prepaid/credits*)
+        case "$config" in
+          *org-uuid-1*) ;;
+          *) printf '\n400'; return 0 ;;
+        esac
+        printf '%s' '{"amount":8871,"currency":"USD","balance":{"money":null,"credits":{"amount_minor":8871,"exponent":2}},"tranches":[{"remaining_amount_minor_units":590,"expires_at":"2027-03-27T00:00:00Z"}],"promo_tranches":[{"remaining_amount_minor_units":8279,"expires_at":"2026-09-19T00:00:00Z"}],"next_expires_at":"2026-09-19T00:00:00Z"}'
+        printf '\n200'
+        ;;
+      *)
+        printf '%s' '{"limits":[{"kind":"session","percent":10,"severity":"normal","is_active":true}]}'
+        printf '\n200'
+        ;;
+    esac
+  }
+
+  output=$(_cb_usage_json)
+
+  assert_eq "88.71" "$(printf '%s' "$output" | jq -r '.[0].credits.balance')" \
+    "the credit balance should be converted from minor units" || return 1
+  assert_eq "USD" "$(printf '%s' "$output" | jq -r '.[0].credits.currency')" \
+    "the credit currency should be reported" || return 1
+  assert_eq "2026-09-19T00:00:00Z" "$(printf '%s' "$output" | jq -r '.[0].credits.nextExpiresAt')" \
+    "the soonest expiry should be reported" || return 1
+  assert_eq "82.79" "$(printf '%s' "$output" | jq -r '.[0].credits.expiringAmount')" \
+    "the amount expiring soonest should be totalled across tranches" || return 1
+  assert_eq "10" "$(printf '%s' "$output" | jq -r '.[0].limits[0].percent')" \
+    "plan limits should still be reported alongside credits"
+)
+
+usage_survives_a_credits_endpoint_failure() (
+  HOME="$TEST_ROOT/usage-credits-fail"
+  export HOME
+  # shellcheck source=../claude_billing.sh
+  . "$SCRIPT"
+  _CB_PLATFORM="windows"
+  mkdir -p "$HOME"
+  CLAUDE_BILLING_TEST_NOW=1786708800
+  export CLAUDE_BILLING_TEST_NOW
+  _cb_cred_store "Claude Code-credentials" \
+    '{"claudeAiOauth":{"accessToken":"live-token","expiresAt":1786712400000}}'
+  printf '%s' '{"oauthAccount":{"organizationUuid":"org-uuid-1"}}' > "$HOME/.claude.json"
+  # Not every account has credits: a refusal must not cost us the plan limits.
+  curl() {
+    config=$(cat)
+    case "$config" in
+      *prepaid/credits*) printf '\n403' ;;
+      *)
+        printf '%s' '{"limits":[{"kind":"session","percent":10,"severity":"normal","is_active":true}]}'
+        printf '\n200'
+        ;;
+    esac
+  }
+
+  output=$(_cb_usage_json)
+
+  assert_eq "ok" "$(printf '%s' "$output" | jq -r '.[0].status')" \
+    "a credits failure must not fail the usage read" || return 1
+  assert_eq "null" "$(printf '%s' "$output" | jq -r '.[0].credits')" \
+    "credits should simply be absent when unavailable" || return 1
+  assert_eq "10" "$(printf '%s' "$output" | jq -r '.[0].limits[0].percent')" \
+    "plan limits should survive a credits failure"
+)
+
+usage_skips_credits_without_an_account_identity() (
+  HOME="$TEST_ROOT/usage-credits-noorg"
+  export HOME
+  # shellcheck source=../claude_billing.sh
+  . "$SCRIPT"
+  _CB_PLATFORM="windows"
+  mkdir -p "$HOME"
+  CLAUDE_BILLING_TEST_NOW=1786708800
+  export CLAUDE_BILLING_TEST_NOW
+  _cb_cred_store "Claude Code-credentials" \
+    '{"claudeAiOauth":{"accessToken":"live-token","expiresAt":1786712400000}}'
+  calls="$HOME/credits-calls"
+  curl() {
+    config=$(cat)
+    case "$config" in
+      *prepaid/credits*) printf '%s\n' "called" >> "$calls"; printf '\n200' ;;
+      *)
+        printf '%s' '{"limits":[]}'
+        printf '\n200'
+        ;;
+    esac
+  }
+
+  _cb_usage_json >/dev/null
+
+  if [ -e "$calls" ]; then
+    printf '    the credits endpoint was called without an organization UUID\n' >&2
+    return 1
+  fi
+)
+
 usage_serves_fresh_entries_from_cache() (
   HOME="$TEST_ROOT/usage-cache"
   export HOME
@@ -1080,6 +1190,12 @@ run_test "JSON status exposes menu bar state" \
   json_status_exposes_menu_bar_state
 run_test "usage reports limits for each account" \
   usage_reports_limits_for_each_account
+run_test "usage reports the prepaid credit balance" \
+  usage_reports_the_prepaid_credit_balance
+run_test "usage survives a credits endpoint failure" \
+  usage_survives_a_credits_endpoint_failure
+run_test "usage skips credits without an account identity" \
+  usage_skips_credits_without_an_account_identity
 run_test "usage serves fresh entries from cache" \
   usage_serves_fresh_entries_from_cache
 run_test "usage keeps the last good figures when a fetch fails" \

@@ -222,6 +222,46 @@ struct UsageSpend: Decodable, Equatable {
     }
 }
 
+/// Prepaid credit balance for an account, from the organization's credits
+/// endpoint. Separate from plan limits: credits are money already on the
+/// account, and they expire, so the soonest expiry travels with the balance.
+struct UsageCredits: Decodable, Equatable {
+    let balance: Double
+    let currency: String
+    let nextExpiresAt: String?
+    let expiringAmount: Double?
+
+    var currencySymbol: String {
+        switch currency.uppercased() {
+        case "USD": return "$"
+        case "EUR": return "€"
+        case "GBP": return "£"
+        case "JPY": return "¥"
+        default: return "\(currency) "
+        }
+    }
+
+    var balanceText: String { String(format: "%@%.2f", currencySymbol, balance) }
+
+    /// Dated, not relative: "expires 19 Sep" is checkable, "in 36 days" is not.
+    var expiryNote: String? {
+        guard let nextExpiresAt, let amount = expiringAmount else { return nil }
+        let parser = ISO8601DateFormatter()
+        parser.formatOptions = [.withFullDate]
+        let iso = ISO8601DateFormatter()
+        let date = parser.date(from: String(nextExpiresAt.prefix(10))) ?? iso.date(from: nextExpiresAt)
+        guard let date else { return nil }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "d MMM"
+        return String(format: "%@%.2f expires %@", currencySymbol, amount, formatter.string(from: date))
+    }
+
+    var detailLabel: String {
+        guard let expiryNote else { return "Credit balance · \(balanceText)" }
+        return "Credit balance · \(balanceText) · \(expiryNote)"
+    }
+}
+
 /// Plan usage for one subscription account. Anything other than `ok` carries a
 /// reason instead of numbers — the endpoint is unofficial, so failure is normal
 /// and must read as "unknown", never as "0%".
@@ -230,6 +270,7 @@ struct UsageAccount: Decodable, Equatable {
     let status: String
     let limits: [UsageLimit]?
     let spend: UsageSpend?
+    let credits: UsageCredits?
     let ageSeconds: Int?
     let staleReason: String?
     let detail: String?
@@ -924,6 +965,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
                     level: spend.level,
                     label: spend.detailLabel
                 ))
+            }
+            if let credits = account.credits {
+                submenu.addItem(detailItem(title: credits.detailLabel))
             }
             if let ageNote = account.ageNote {
                 submenu.addItem(detailItem(title: ageNote))
