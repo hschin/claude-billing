@@ -34,6 +34,7 @@ The core Claude Code billing commands work across the supported shells on all th
 | Subscription, Anthropic API, and Bedrock switching | Supported | Supported | Supported |
 | Multiple subscription accounts | Supported | Supported | Supported |
 | Prompt and statusline indicator | Supported | Supported | Supported |
+| Subscription plan usage reporting | Supported | Supported | Supported |
 | AWS SSO session expiry reporting | Supported | Supported | Supported |
 | Claude Desktop account switching | Supported | Not yet supported | Not yet supported |
 | Native menu bar or system tray app | Supported | Not yet supported | Not yet supported |
@@ -118,6 +119,7 @@ claude-billing status --json         # machine-readable mode and account state
 claude-billing accounts              # list registered subscription accounts
 claude-billing add-account <name>    # register a claude.ai subscription account
 claude-billing remove-account <name> # remove an account and its stored token
+claude-billing usage                 # show subscription plan usage (--refresh forces a fetch)
 claude-billing sso                   # show AWS SSO session expiry for your Bedrock profiles
 claude-billing sso-login <session>   # refresh an expired AWS SSO login
 claude-billing desktop [name]        # show or switch the Claude.app desktop login (macOS)
@@ -139,11 +141,13 @@ The optional native menu bar app shows the current billing mode and lets you swi
 claude-billing menubar install
 ```
 
-The menu bar uses a compact rounded monogram for the active mode: **S** for subscription, **A** for Anthropic API, and **B** for Bedrock. Hover over it for the active account or AWS profile. The dropdown labels this billing state as **Claude Code CLI**, lists subscription accounts under their own section, then gives AWS Bedrock and Anthropic API a section each — Bedrock first, since it carries the SSO sessions and sees more use — marks the current choice, and includes a restart reminder. A separate **Claude Desktop** section shows and switches the desktop app's account without changing the billing badge. While a switch is running, the badge becomes a progress indicator and other choices are temporarily disabled. It refreshes automatically and has a manual **Refresh** action. A billing switch updates the same Claude Code settings and prompt/statusline cache as the CLI; restart Claude Code afterward to apply it.
+The menu bar uses a compact rounded monogram for the active mode: **S** for subscription, **A** for Anthropic API, and **B** for Bedrock. Hover over it for the active account or AWS profile. The dropdown groups the CLI's own billing under a **Claude Code CLI subscriptions** header, then gives AWS Bedrock and Anthropic API a section each — Bedrock first, since it carries the SSO sessions and sees more use. The current choice is checkmarked and stays clickable rather than greyed out, and the Bedrock row names the AWS profile a switch would select whenever that profile is deterministic (an explicit one in your Claude settings or claude-billing config); an inherited profile is shown as *inherited profile*, because it depends on the environment Claude Code is launched from. A separate **Claude Desktop** row shows the desktop app's account and switches it from its own submenu, without changing the billing badge — the submenu keeps an account name from appearing twice at the top level meaning two different things. While a switch is running, the badge becomes a progress indicator and other choices are temporarily disabled. It refreshes automatically and has a manual **Refresh** action. A billing switch updates the same Claude Code settings and prompt/statusline cache as the CLI; restart Claude Code afterward to apply it.
 
 The **Manage Claude Code CLI** submenu can add and remove subscription accounts, configure AWS Bedrock, update the Anthropic API key, and start a Claude.ai login. Account names and removal confirmations use native dialogs. Authentication, secret entry, and Bedrock prompts continue in Terminal so the existing CLI remains responsible for credential handling and validation. Before changing the Claude Desktop account, the menu confirms that a running Claude Desktop will quit so its session files can be swapped safely, then reopen automatically. If that account has no saved desktop session yet, Claude Desktop reopens signed out; sign in once and later switches reuse it.
 
 When `~/.aws/config` declares SSO logins, an **AWS SSO sessions** row appears below AWS Bedrock with its own submenu; Bedrock itself stays a one-click switch. The submenu lists each session with the time left on its cached access token, the AWS profiles that session signs in, and a marker on the one behind the profile Claude Code currently uses. The row title counts sessions that are expired or signed out, so a stale login is visible without opening the submenu, and choosing a session opens `aws sso login` in Terminal. The badge is unaffected — SSO expiry never changes the billing monogram. Sessions are grouped by SSO start URL, so one login covers every profile that shares it.
+
+A **Plan usage** row sits under the subscription accounts, showing the active account's 5-hour session limit — the one that actually stops work — with a submenu breaking down every registered account: each limit's percentage and reset time in your local time zone, extra usage credits when enabled, and how stale the figures are. It refreshes on its own slower timer so a network call never delays the billing state, and the menu's **Refresh** action forces a usage fetch too. The numbers come from an unofficial endpoint — see [Subscription plan usage](#subscription-plan-usage) for the caveats.
 
 For Bedrock, an explicit configured AWS profile is deterministic and appears in the tooltip and current-mode row. A login item does not normally inherit a terminal's `AWS_PROFILE`, so inherited profile mode usually resolves to `default` when switched from the menu. Configure an explicit profile with `claude-billing config` if the menu should always select a particular AWS account.
 
@@ -154,6 +158,24 @@ claude-billing menubar uninstall
 ```
 
 `claude-billing uninstall` also removes the menu bar app when it is installed.
+
+## Subscription plan usage
+
+```sh
+claude-billing usage
+# Subscription plan usage:
+#   work:
+#     5-hour session: 72%
+#     Weekly (all models): 41% — resets 2026-08-19 01:59:59 UTC
+#     Extra usage credits: 86% (USD 17.20 of 20.00)
+#   personal: access token expired — switch to this account to refresh it
+```
+
+**This uses an unofficial endpoint.** Claude Code's `/usage` view is the authoritative source. claude-billing calls the same `api.anthropic.com/api/oauth/usage` request that view makes, with your subscription OAuth token. That endpoint is not a documented, versioned API: it can change or disappear at any time. When it does, usage reports as unavailable — it never blocks a billing switch and never invents a number. Only the normalized `limits` array and `spend` object are read; the other keys in the response are internal.
+
+Credentials stay read-only. An account's stored access token is used exactly as it is; nothing refreshes, rewrites, or deletes a token to read usage. Access tokens are short-lived, so an account you haven't used for a while reports `token expired` — switch to it once and Claude Code refreshes the token itself. Tokens are handed to curl on stdin, never as command-line arguments, since arguments are visible to other users in `ps`.
+
+Results are cached in `~/.claude-billing/usage-cache.json` (chmod 600) for five minutes, so repeated calls and the menu bar's polling don't hammer the endpoint. Override with `CLAUDE_BILLING_USAGE_TTL` (seconds), or force a fetch with `claude-billing usage --refresh`. If a refresh fails, the last good figures stay visible, labelled with their age and the reason they weren't updated. `claude-billing usage --json` returns the same data for scripts.
 
 ## Multiple subscription accounts
 
@@ -327,6 +349,7 @@ If the credential store rejects a requested secret deletion, uninstall finishes 
 | `~/.aws/sso/cache/*.json` | Read only, for AWS SSO access-token expiry |
 | `~/.claude-billing-accounts` | Registry of named subscription accounts and which one is active |
 | `~/.claude-billing-mode` | Current billing mode, for shell prompt indicators (resynced by `status`) |
+| `~/.claude-billing/usage-cache.json` | Cached subscription plan usage, chmod 600 (five-minute TTL) |
 | `~/.claude-billing/claude_billing.sh` | The installed script |
 | `~/.claude-billing/desktop/<name>/` | Stashed Claude.app desktop logins (contents encrypted by Claude Safe Storage) |
 | `~/Library/Application Support/Claude/` | Desktop app profile — `Cookies` and `config.json` swapped by `desktop <name>` (macOS) |

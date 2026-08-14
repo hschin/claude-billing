@@ -64,6 +64,95 @@ struct SSOSessionState: Decodable, Equatable {
     }
 }
 
+/// One plan limit as reported by Claude's OAuth usage endpoint.
+struct UsageLimit: Decodable, Equatable {
+    let kind: String
+    let percent: Int
+    let severity: String
+    let resetsAt: String?
+    let isActive: Bool
+
+    var name: String {
+        switch kind {
+        case "session": return "5-hour session"
+        case "weekly_all": return "Weekly · all models"
+        case "weekly_opus": return "Weekly · Opus"
+        case "weekly_sonnet": return "Weekly · Sonnet"
+        default: return kind.replacingOccurrences(of: "_", with: " ")
+        }
+    }
+
+    /// Reset times arrive as ISO-8601 UTC; show them in the user's own zone,
+    /// since "resets at 02:00 UTC" needs mental arithmetic at a glance.
+    var resetDescription: String? {
+        guard let resetsAt else { return nil }
+        let parsers = [ISO8601DateFormatter(), ISO8601DateFormatter()]
+        parsers[0].formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        parsers[1].formatOptions = [.withInternetDateTime]
+        guard let date = parsers.compactMap({ $0.date(from: resetsAt) }).first else { return nil }
+        let formatter = DateFormatter()
+        formatter.dateFormat = Calendar.current.isDateInToday(date) ? "HH:mm" : "EEE HH:mm"
+        return formatter.string(from: date)
+    }
+
+    var menuTitle: String {
+        let reset = resetDescription.map { " · resets \($0)" } ?? ""
+        return "\(name) · \(percent)%\(reset)"
+    }
+}
+
+struct UsageSpend: Decodable, Equatable {
+    let percent: Int
+    let used: Double
+    let limit: Double
+    let currency: String
+    let severity: String
+
+    var menuTitle: String {
+        String(format: "Extra usage credits · %d%% (%@ %.2f of %.2f)", percent, currency, used, limit)
+    }
+}
+
+/// Plan usage for one subscription account. Anything other than `ok` carries a
+/// reason instead of numbers — the endpoint is unofficial, so failure is normal
+/// and must read as "unknown", never as "0%".
+struct UsageAccount: Decodable, Equatable {
+    let account: String
+    let status: String
+    let limits: [UsageLimit]?
+    let spend: UsageSpend?
+    let ageSeconds: Int?
+    let staleReason: String?
+    let detail: String?
+
+    var displayName: String { account.isEmpty ? "Subscription" : account }
+    var isOK: Bool { status == "ok" }
+
+    /// The 5-hour session limit is the one that actually stops work, so it is
+    /// always the headline; anything else only stands in when it's absent.
+    var headline: UsageLimit? {
+        let all = limits ?? []
+        return all.first { $0.kind == "session" }
+            ?? all.max { ($0.percent, $0.isActive ? 1 : 0) < ($1.percent, $1.isActive ? 1 : 0) }
+    }
+
+    var problem: String? {
+        switch status {
+        case "ok": return nil
+        case "token-expired": return "token expired — switch to this account to refresh"
+        case "no-token": return "no stored login"
+        default: return detail ?? "usage unavailable"
+        }
+    }
+
+    var ageNote: String? {
+        guard let ageSeconds, ageSeconds > 60 else { return nil }
+        let minutes = ageSeconds / 60
+        let base = minutes < 60 ? "cached \(minutes) min ago" : "cached \(minutes / 60)h ago"
+        return staleReason.map { "\(base) — \($0)" } ?? base
+    }
+}
+
 struct BillingState: Decodable, Equatable {
     let mode: String
     let kind: String
@@ -72,6 +161,27 @@ struct BillingState: Decodable, Equatable {
     let accounts: [String]
     let desktop: DesktopState?
     let awsSso: [SSOSessionState]?
+    let bedrockProfile: String?
+    let bedrockProfileSource: String?
+
+    /// Names the profile a Bedrock switch would select, so the row says what a
+    /// click will do rather than only what it did. An inherited profile depends
+    /// on the environment of whoever launches Claude Code — and a login item
+    /// doesn't inherit a shell's `AWS_PROFILE` — so it is never named.
+    var bedrockRowTitle: String {
+        if kind == "bedrock" {
+            return "AWS Bedrock · \(awsProfile ?? "default")"
+        }
+        switch bedrockProfileSource {
+        case "settings", "config":
+            if let bedrockProfile { return "AWS Bedrock · \(bedrockProfile)" }
+            return "AWS Bedrock"
+        case "inherited":
+            return "AWS Bedrock · inherited profile"
+        default:
+            return "AWS Bedrock"
+        }
+    }
 
     var ssoSessions: [SSOSessionState] { awsSso ?? [] }
 
@@ -104,10 +214,6 @@ struct BillingState: Decodable, Equatable {
         default:
             return "Unknown billing mode"
         }
-    }
-
-    var claudeCodeDisplayName: String {
-        "Claude Code CLI · \(displayName)"
     }
 
     var symbolName: String {
@@ -312,6 +418,25 @@ private final class BillingClient {
         }
     }
 
+    /// Reads the shell utility's usage cache; it only reaches the network when
+    /// an entry is stale, or when `refresh` forces it.
+    func loadUsage(refresh: Bool, completion: @escaping (Result<[UsageAccount], Error>) -> Void) {
+        run(arguments: ["usage", "--json"] + (refresh ? ["--refresh"] : [])) { result in
+            guard result.status == 0 else {
+                completion(.failure(BillingClientError.commandFailed(result.message)))
+                return
+            }
+            do {
+                let usage = try JSONDecoder().decode([UsageAccount].self, from: Data(result.standardOutput.utf8))
+                completion(.success(usage))
+            } catch {
+                completion(.failure(BillingClientError.invalidState(
+                    "Could not read plan usage. \(error.localizedDescription)"
+                )))
+            }
+        }
+    }
+
     func perform(_ action: BillingAction, completion: @escaping (Result<String, Error>) -> Void) {
         perform(arguments: action.arguments, completion: completion)
     }
@@ -393,8 +518,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     private let client = BillingClient()
     private var statusItem: NSStatusItem!
     private var currentState: BillingState?
+    private var usage: [UsageAccount] = []
     private var isSwitching = false
+    private var isLoadingUsage = false
     private var refreshTimer: Timer?
+    private var usageTimer: Timer?
     private var progressIndicator: NSProgressIndicator?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -406,10 +534,33 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
             self?.refreshState(showError: false)
         }
+        // Usage can involve a network call, so it runs on its own slower timer
+        // and never gates the billing state the menu is really about.
+        refreshUsage(force: false)
+        usageTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            self?.refreshUsage(force: false)
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         refreshTimer?.invalidate()
+        usageTimer?.invalidate()
+    }
+
+    private func refreshUsage(force: Bool) {
+        guard !isLoadingUsage else { return }
+        isLoadingUsage = true
+        client.loadUsage(refresh: force) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.isLoadingUsage = false
+                // A usage failure is not worth an alert; the row says so itself.
+                if case let .success(usage) = result {
+                    self.usage = usage
+                    self.rebuildMenu()
+                }
+            }
+        }
     }
 
     private func refreshState(showError: Bool) {
@@ -447,13 +598,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(detailItem)
             menu.addItem(.separator())
         } else if let currentState {
-            let currentItem = NSMenuItem(title: currentState.claudeCodeDisplayName, action: nil, keyEquivalent: "")
-            currentItem.image = menuImage(named: currentState.symbolName, description: currentState.displayName)
-            currentItem.isEnabled = false
-            menu.addItem(currentItem)
-            menu.addItem(.separator())
-
-            menu.addItem(sectionItem(title: currentState.accounts.isEmpty ? "CLI subscription" : "CLI subscriptions"))
+            // One header for the provider group whose rows can't name
+            // themselves; the checkmark already says which mode is current, so
+            // no separate current-state row is needed.
+            menu.addItem(sectionItem(title: currentState.accounts.isEmpty
+                ? "Claude Code CLI subscription"
+                : "Claude Code CLI subscriptions"))
 
             if currentState.accounts.isEmpty {
                 menu.addItem(actionItem(
@@ -473,15 +623,16 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
 
+            if !usage.isEmpty {
+                menu.addItem(usageMenuItem(activeAccount: currentState.account))
+            }
+
             // Bedrock and the API key are separate providers, so they get their
             // own sections rather than one "other billing" bucket. Bedrock
             // leads because it carries the SSO sessions and sees more use.
             menu.addItem(.separator())
-            let bedrockTitle = currentState.kind == "bedrock"
-                ? "AWS Bedrock · \(currentState.awsProfile ?? "default")"
-                : "AWS Bedrock"
             menu.addItem(actionItem(
-                title: bedrockTitle,
+                title: currentState.bedrockRowTitle,
                 action: .bedrock,
                 isCurrent: currentState.kind == "bedrock",
                 symbolName: "cloud"
@@ -497,34 +648,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
                 isCurrent: currentState.kind == "api",
                 symbolName: "key"
             ))
-            menu.addItem(.separator())
-
-            let restartItem = NSMenuItem(title: "CLI billing changes require a Claude Code restart", action: nil, keyEquivalent: "")
-            restartItem.image = menuImage(named: "exclamationmark.circle", description: "Restart required")
-            restartItem.isEnabled = false
-            menu.addItem(restartItem)
-
             if currentState.desktop?.available == true {
                 menu.addItem(.separator())
-                let desktopOwner = currentState.desktop?.account ?? "Unknown account"
-                let desktopSection = sectionItem(title: "Claude Desktop · \(desktopOwner)")
-                desktopSection.image = menuImage(named: "desktopcomputer", description: "Claude Desktop")
-                menu.addItem(desktopSection)
-
-                if currentState.accounts.isEmpty {
-                    let emptyItem = NSMenuItem(title: "Register subscription accounts from the CLI first", action: nil, keyEquivalent: "")
-                    emptyItem.isEnabled = false
-                    menu.addItem(emptyItem)
-                } else {
-                    for account in currentState.accounts {
-                        menu.addItem(actionItem(
-                            title: account,
-                            action: .desktop(account: account),
-                            isCurrent: currentState.desktop?.account == account,
-                            symbolName: "person.crop.circle"
-                        ))
-                    }
-                }
+                menu.addItem(desktopMenuItem(for: currentState))
             }
             menu.addItem(.separator())
             menu.addItem(managementMenuItem(for: currentState))
@@ -550,6 +676,19 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         return item
     }
 
+    /// Read-only detail under an item — profile lists, usage figures. Smaller
+    /// secondary text reads as detail; a plain disabled row reads as a command
+    /// you're not allowed to use.
+    private func detailItem(title: String) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        item.isEnabled = false
+        item.attributedTitle = NSAttributedString(string: title, attributes: [
+            .font: NSFont.menuFont(ofSize: NSFont.smallSystemFontSize),
+            .foregroundColor: NSColor.secondaryLabelColor,
+        ])
+        return item
+    }
+
     private func actionItem(
         title: String,
         action: BillingAction,
@@ -564,7 +703,78 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         item.representedObject = action
         item.image = menuImage(named: symbolName, description: title)
         item.state = isCurrent ? .on : .off
-        item.isEnabled = !isCurrent && !isSwitching
+        // The current mode stays enabled — greying it out reads as "unavailable"
+        // rather than "already selected". switchClicked ignores clicks on it, so
+        // re-running a transition can't disturb a working setup.
+        item.isEnabled = !isSwitching
+        return item
+    }
+
+    /// Claude Desktop owns exactly one subscription login, independent of CLI
+    /// billing. Its accounts live in a submenu so the same account name can't
+    /// appear twice at the top level meaning two different things.
+    private func desktopMenuItem(for state: BillingState) -> NSMenuItem {
+        let owner = state.desktop?.account ?? "Unknown account"
+        let item = NSMenuItem(title: "Claude Desktop · \(owner)", action: nil, keyEquivalent: "")
+        item.image = menuImage(named: "desktopcomputer", description: "Claude Desktop")
+
+        let submenu = NSMenu()
+        if state.accounts.isEmpty {
+            submenu.addItem(detailItem(title: "Register subscription accounts from the CLI first"))
+        } else {
+            for account in state.accounts {
+                submenu.addItem(actionItem(
+                    title: account,
+                    action: .desktop(account: account),
+                    isCurrent: state.desktop?.account == account,
+                    symbolName: "person.crop.circle"
+                ))
+            }
+        }
+        item.submenu = submenu
+        return item
+    }
+
+    /// Plan usage for the subscription accounts. The row summarises the active
+    /// account (the plan being spent right now) and the submenu breaks every
+    /// account down. Figures come from an unofficial endpoint, so the submenu
+    /// says so and unavailable accounts show a reason instead of a number.
+    private func usageMenuItem(activeAccount: String?) -> NSMenuItem {
+        let active = usage.first { $0.account == (activeAccount ?? "") } ?? usage.first
+        var title = "Plan usage"
+        var symbol = "chart.bar"
+        if let active, let headline = active.headline, active.isOK {
+            title = "Plan usage · \(headline.percent)% \(headline.name.lowercased())"
+            if headline.percent >= 80 { symbol = "chart.bar.fill" }
+        } else if let active, let problem = active.problem {
+            title = "Plan usage · \(problem.split(separator: "—").first?.trimmingCharacters(in: .whitespaces) ?? problem)"
+            symbol = "exclamationmark.triangle.fill"
+        }
+
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        item.image = menuImage(named: symbol, description: "Plan usage")
+
+        let submenu = NSMenu()
+        for (index, account) in usage.enumerated() {
+            if index > 0 { submenu.addItem(.separator()) }
+            submenu.addItem(sectionItem(title: account.displayName))
+            if let problem = account.problem {
+                submenu.addItem(detailItem(title: problem))
+                continue
+            }
+            for limit in account.limits ?? [] {
+                submenu.addItem(detailItem(title: limit.menuTitle))
+            }
+            if let spend = account.spend {
+                submenu.addItem(detailItem(title: spend.menuTitle))
+            }
+            if let ageNote = account.ageNote {
+                submenu.addItem(detailItem(title: ageNote))
+            }
+        }
+        // No refresh action or source note here: the menu's own Refresh forces a
+        // usage fetch, and the endpoint caveat lives in the docs and CLI output.
+        item.submenu = submenu
         return item
     }
 
@@ -595,10 +805,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             sessionItem.toolTip = "Sign in to this AWS SSO portal again in Terminal."
             sessionItem.isEnabled = !isSwitching
             submenu.addItem(sessionItem)
-            submenu.addItem(sectionItem(title: "    \(session.profileSummary)"))
+            submenu.addItem(detailItem(title: session.profileSummary))
         }
         submenu.addItem(.separator())
-        submenu.addItem(sectionItem(title: "One login per SSO portal, shared by its profiles"))
+        submenu.addItem(detailItem(title: "One login per SSO portal, shared by its profiles"))
         item.submenu = submenu
         return item
     }
@@ -674,6 +884,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func switchClicked(_ sender: NSMenuItem) {
         guard let action = sender.representedObject as? BillingAction, !isSwitching else { return }
+        // Clicking the mode you're already on is a no-op, not a re-transition.
+        guard sender.state != .on else { return }
         if case let .desktop(account) = action, !confirmDesktopSwitch(to: account) {
             return
         }
@@ -698,7 +910,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func refreshClicked() {
         refreshState(showError: true)
+        refreshUsage(force: true)
     }
+
 
     @objc private func addAccountClicked() {
         let alert = NSAlert()

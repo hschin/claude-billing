@@ -782,6 +782,176 @@ _claude_billing_sso_login() {
   fi
 }
 
+# --- Subscription plan usage ---
+# Claude Code shows plan utilization (its /usage view) by calling
+# api.anthropic.com/api/oauth/usage with the subscription OAuth token. That
+# endpoint is NOT a documented, versioned API: it can change or disappear
+# without notice, so every field is read defensively and any failure degrades to
+# "unavailable" rather than breaking a switch. Only the normalized `limits`
+# array and `spend` object are consumed; the sibling code-named keys in the
+# response are internal and deliberately ignored.
+#
+# Credentials stay read-only here. An account's stashed access token is used as
+# it is; nothing refreshes, rewrites, or deletes a token to read usage, so an
+# expired one reports "token expired" instead (switching to that account makes
+# Claude Code refresh it). Tokens are passed to curl on stdin, never in argv,
+# because process arguments are visible to other users via ps.
+
+_CB_USAGE_ENDPOINT="https://api.anthropic.com/api/oauth/usage"
+_CB_USAGE_BETA="oauth-2025-04-20"
+
+_cb_usage_cache_file() {
+  printf '%s' "$HOME/.claude-billing/usage-cache.json"
+}
+
+# Print the stored credential blob for an account: the live token when the
+# account is active (or when no accounts are registered), its stash otherwise.
+_cb_usage_credentials() {
+  local name="${1:-}" active
+  active=$(_cb_active_get)
+  if [[ -z "$name" || "$name" == "$active" ]]; then
+    _cb_cred_retrieve "Claude Code-credentials"
+    return 0
+  fi
+  _cb_cred_retrieve "$(_cb_acct_service "$name")"
+}
+
+# Fetch usage for one account. Always prints one JSON object; status is ok,
+# no-token, token-expired, or unavailable.
+_cb_usage_fetch_one() {
+  local name="${1:-}" creds token expires_ms now_ms body http_status response
+  creds=$(_cb_usage_credentials "$name")
+  if [[ -z "$creds" ]]; then
+    jq -n --arg account "$name" '{account: $account, status: "no-token"}'
+    return 0
+  fi
+  token=$(printf '%s' "$creds" | jq -r '.claudeAiOauth.accessToken // empty' 2>/dev/null)
+  expires_ms=$(printf '%s' "$creds" | jq -r '.claudeAiOauth.expiresAt // empty' 2>/dev/null)
+  if [[ -z "$token" ]]; then
+    jq -n --arg account "$name" '{account: $account, status: "no-token"}'
+    return 0
+  fi
+  now_ms=$(( $(_cb_now) * 1000 ))
+  if [[ -n "$expires_ms" ]] && [[ "$expires_ms" =~ ^[0-9]+$ ]] && (( expires_ms <= now_ms )); then
+    jq -n --arg account "$name" '{account: $account, status: "token-expired"}'
+    return 0
+  fi
+  # curl reads the auth header from stdin so the token never reaches argv.
+  response=$(printf '%s\n' \
+    "header = \"Authorization: Bearer $token\"" \
+    "header = \"anthropic-beta: $_CB_USAGE_BETA\"" \
+    "header = \"User-Agent: claude-billing/$_CB_VERSION\"" \
+    "silent" "show-error" "max-time = 20" "write-out = \"\\n%{http_code}\"" \
+    "url = \"$_CB_USAGE_ENDPOINT\"" | curl --config - 2>/dev/null)
+  http_status=$(printf '%s' "$response" | tail -n 1)
+  body=$(printf '%s' "$response" | sed '$d')
+  if [[ "$http_status" != "200" ]] || [[ -z "$body" ]]; then
+    jq -n --arg account "$name" --arg code "$http_status" \
+      '{account: $account, status: "unavailable",
+        detail: (if $code == "" or $code == "000" then "could not reach api.anthropic.com"
+                 else "api.anthropic.com returned HTTP \($code)" end)}'
+    return 0
+  fi
+  printf '%s' "$body" | jq -c --arg account "$name" --argjson fetched "$(_cb_now)" '
+    {
+      account: $account,
+      status: "ok",
+      fetchedAt: $fetched,
+      limits: [ (.limits // [])[]
+                | select(type == "object" and .percent != null)
+                | {kind: (.kind // "unknown"), group: (.group // ""),
+                   percent: (.percent | if type == "number" then round else 0 end),
+                   severity: (.severity // "normal"),
+                   resetsAt: .resets_at, isActive: (.is_active // false)} ],
+      spend: (if (.spend | type) == "object" and (.spend.enabled // false)
+              then {percent: (.spend.percent // 0),
+                    used: ((.spend.used.amount_minor // 0) / (pow(10; .spend.used.exponent // 2))),
+                    limit: ((.spend.limit.amount_minor // 0) / (pow(10; .spend.limit.exponent // 2))),
+                    currency: (.spend.used.currency // ""),
+                    severity: (.spend.severity // "normal")}
+              else null end)
+    }' 2>/dev/null || jq -n --arg account "$name" \
+      '{account: $account, status: "unavailable", detail: "unexpected response from api.anthropic.com"}'
+}
+
+# Usage for every registered account (or the single legacy login), served from
+# ~/.claude-billing/usage-cache.json unless an entry is older than the TTL.
+# --refresh forces a fetch. Cached entries carry ageSeconds so callers can say
+# how stale a figure is.
+_cb_usage_json() {
+  local force="${1:-}" ttl="${CLAUDE_BILLING_USAGE_TTL:-300}" cache_file cache entry name now
+  local names="" out="" fetched_at age
+  cache_file=$(_cb_usage_cache_file)
+  now=$(_cb_now)
+  cache='{}'
+  [[ -f "$cache_file" ]] && cache=$(jq -c '. // {}' "$cache_file" 2>/dev/null || printf '{}')
+  names=$(_cb_accounts_list)
+  [[ -z "$names" ]] && names="-"
+  for name in $(printf '%s' "$names"); do
+    [[ "$name" == "-" ]] && name=""
+    entry=$(printf '%s' "$cache" | jq -c --arg k "${name:-_legacy}" '.[$k] // empty' 2>/dev/null)
+    fetched_at=$(printf '%s' "$entry" | jq -r '.fetchedAt // empty' 2>/dev/null)
+    age=""
+    if [[ -n "$fetched_at" ]] && [[ "$fetched_at" =~ ^[0-9]+$ ]]; then
+      age=$(( now - fetched_at ))
+    fi
+    if [[ "$force" != "--refresh" ]] && [[ -n "$age" ]] && (( age < ttl )); then
+      out="${out}$(printf '%s' "$entry" | jq -c --argjson age "$age" '. + {ageSeconds: $age}')"
+      continue
+    fi
+    entry=$(_cb_usage_fetch_one "$name")
+    # A failed fetch keeps the last good numbers visible, marked with their age.
+    if [[ "$(printf '%s' "$entry" | jq -r '.status')" != "ok" ]] && [[ -n "$age" ]]; then
+      entry=$(jq -n --argjson old "$(printf '%s' "$cache" | jq -c --arg k "${name:-_legacy}" '.[$k]')" \
+                    --argjson new "$entry" --argjson age "$age" \
+        'if ($old | type) == "object" and $old.status == "ok"
+         then $old + {ageSeconds: $age, staleReason: ($new.detail // $new.status)}
+         else $new end')
+    fi
+    # ageSeconds/staleReason describe this read, not the stored result.
+    cache=$(printf '%s' "$cache" | jq -c --arg k "${name:-_legacy}" \
+      --argjson v "$(printf '%s' "$entry" | jq -c 'del(.ageSeconds, .staleReason)')" '.[$k] = $v')
+    out="${out}$(printf '%s' "$entry" | jq -c '. + {ageSeconds: (.ageSeconds // 0)}')"
+  done
+  mkdir -p "$(dirname "$cache_file")" 2>/dev/null
+  if printf '%s' "$cache" > "${cache_file}.tmp" 2>/dev/null; then
+    chmod 600 "${cache_file}.tmp" 2>/dev/null
+    mv "${cache_file}.tmp" "$cache_file" 2>/dev/null || rm -f "${cache_file}.tmp"
+  fi
+  printf '%s' "$out" | jq -s -c '.'
+}
+
+_cb_usage_lines() {
+  printf '%s' "$1" | jq -r '
+    def money: (. * 100 | round) as $c
+      | "\($c / 100 | floor).\(if ($c % 100) < 10 then "0" else "" end)\($c % 100)";
+    def limit_name:
+      if . == "session" then "5-hour session"
+      elif . == "weekly_all" then "Weekly (all models)"
+      elif . == "weekly_opus" then "Weekly (Opus)"
+      elif . == "weekly_sonnet" then "Weekly (Sonnet)"
+      else (gsub("_"; " ")) end;
+    .[] |
+    "  \(if .account == "" then "subscription" else .account end):" as $head |
+    if .status == "ok" then
+      $head,
+      ( .limits[] | "    \(.kind | limit_name): \(.percent)%" +
+        (if .resetsAt != null then " — resets \(.resetsAt | sub("\\..*$"; "") | sub("T"; " ") + " UTC")" else "" end) ),
+      ( if .spend != null then
+          "    Extra usage credits: \(.spend.percent)% (\(.spend.currency) \(.spend.used | money) of \(.spend.limit | money))"
+        else empty end ),
+      ( if (.ageSeconds // 0) > 60 then
+          "    (cached \((.ageSeconds / 60) | floor) min ago\(if .staleReason != null then ": \(.staleReason)" else "" end))"
+        else empty end )
+    elif .status == "token-expired" then
+      "\($head) access token expired — switch to this account to refresh it"
+    elif .status == "no-token" then
+      "\($head) no stored login"
+    else
+      "\($head) unavailable (\(.detail // "unknown error"))"
+    end'
+}
+
 _claude_billing_login() {
   if ! command -v claude &>/dev/null; then
     echo "claude CLI not found in PATH — run 'claude auth login --claudeai' once it is installed"
@@ -1094,8 +1264,26 @@ claude_billing() {
           (if ($e.AWS_PROFILE // "") != "" then $e.AWS_PROFILE else $inherited end)
         else "" end' "$settings" 2>/dev/null) || active_aws_profile=""
       sso_json=$(_cb_sso_status_json "$active_aws_profile") || sso_json='[]'
+      # The profile Bedrock would use even when Bedrock isn't the current mode,
+      # so callers can show what a switch would select. Only explicit settings
+      # and explicit config are deterministic; an inherited profile depends on
+      # the environment of whoever starts Claude Code.
+      local bedrock_profile="" bedrock_source="inherited" conf_mode="" conf_profile=""
+      if [[ -f "$conf" ]]; then
+        conf_mode=$(_cb_conf_get "$conf" CLAUDE_BILLING_AWS_PROFILE_MODE)
+        conf_profile=$(_cb_conf_get "$conf" CLAUDE_BILLING_AWS_PROFILE)
+      fi
+      if [[ -n "$active_aws_profile" ]]; then
+        bedrock_profile="$active_aws_profile"
+        bedrock_source="settings"
+      elif [[ "$conf_mode" == "explicit" && -n "$conf_profile" ]]; then
+        bedrock_profile="$conf_profile"
+        bedrock_source="config"
+      fi
       json_status=$(jq -c \
         --argjson aws_sso "$sso_json" \
+        --arg bedrock_profile "$bedrock_profile" \
+        --arg bedrock_source "$bedrock_source" \
         --arg accounts "$(_cb_accounts_list)" \
         --arg active "$(_cb_active_get)" \
         --arg desktop_account "$(_cb_desktop_owner_get)" \
@@ -1123,6 +1311,8 @@ claude_billing() {
         . + {
           accounts: ($accounts | split(" ") | map(select(length > 0))),
           awsSso: $aws_sso,
+          bedrockProfile: (if $bedrock_profile != "" then $bedrock_profile else null end),
+          bedrockProfileSource: $bedrock_source,
           desktop: {
             available: ($desktop_available == "true"),
             account: (if $desktop_account != "" then $desktop_account else null end)
@@ -1160,6 +1350,21 @@ claude_billing() {
         desk_owner=$(_cb_desktop_owner_get)
         echo "Desktop (Claude.app): ${desk_owner:-unknown account}"
       fi
+      ;;
+
+    usage)
+      _cb_require_cmd jq "install with: brew install jq / apt install jq / winget install jqlang.jq" || return 1
+      _cb_require_cmd curl "install curl first" || return 1
+      local usage_json usage_force=""
+      [[ "${2:-}" == "--refresh" || "${3:-}" == "--refresh" ]] && usage_force="--refresh"
+      usage_json=$(_cb_usage_json "$usage_force") || return 1
+      if [[ "${2:-}" == "--json" || "${3:-}" == "--json" ]]; then
+        printf '%s\n' "$usage_json"
+        return 0
+      fi
+      echo "Subscription plan usage:"
+      _cb_usage_lines "$usage_json"
+      echo "Source: Claude's unofficial OAuth usage endpoint — figures may lag /usage in Claude Code"
       ;;
 
     sso)
@@ -1257,6 +1462,7 @@ claude_billing() {
       echo "  accounts               List registered subscription accounts"
       echo "  add-account <name>     Register a claude.ai subscription account"
       echo "  remove-account <name>  Remove an account and its stored token"
+      echo "  usage [--json]         Show subscription plan usage (add --refresh to force)"
       echo "  sso [--json]           Show AWS SSO session expiry for Bedrock profiles"
       echo "  sso-login <session>    Refresh an expired AWS SSO login"
       echo "  desktop [name]         Show or switch the Claude.app desktop login (macOS)"

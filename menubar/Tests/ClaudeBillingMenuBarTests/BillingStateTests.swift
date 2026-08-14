@@ -3,9 +3,9 @@ import XCTest
 
 final class BillingStateTests: XCTestCase {
     func testEachBillingKindHasADistinctMenuBarLetter() {
-        let subscription = BillingState(mode: "sub:work", kind: "subscription", account: "work", awsProfile: nil, accounts: ["work"], desktop: nil, awsSso: nil)
-        let api = BillingState(mode: "api", kind: "api", account: nil, awsProfile: nil, accounts: [], desktop: nil, awsSso: nil)
-        let bedrock = BillingState(mode: "bedrock:work-aws", kind: "bedrock", account: nil, awsProfile: "work-aws", accounts: [], desktop: nil, awsSso: nil)
+        let subscription = BillingState(mode: "sub:work", kind: "subscription", account: "work", awsProfile: nil, accounts: ["work"], desktop: nil, awsSso: nil, bedrockProfile: nil, bedrockProfileSource: nil)
+        let api = BillingState(mode: "api", kind: "api", account: nil, awsProfile: nil, accounts: [], desktop: nil, awsSso: nil, bedrockProfile: nil, bedrockProfileSource: nil)
+        let bedrock = BillingState(mode: "bedrock:work-aws", kind: "bedrock", account: nil, awsProfile: "work-aws", accounts: [], desktop: nil, awsSso: nil, bedrockProfile: nil, bedrockProfileSource: nil)
 
         XCTAssertEqual(subscription.statusIconLetter, "S")
         XCTAssertEqual(api.statusIconLetter, "A")
@@ -28,7 +28,33 @@ final class BillingStateTests: XCTestCase {
         let state = try JSONDecoder().decode(BillingState.self, from: data)
 
         XCTAssertEqual(state.displayName, "AWS Bedrock · work-aws")
-        XCTAssertEqual(state.claudeCodeDisplayName, "Claude Code CLI · AWS Bedrock · work-aws")
+    }
+
+    func testBedrockRowNamesTheProfileASwitchWouldSelect() throws {
+        func state(_ json: String) throws -> BillingState {
+            try JSONDecoder().decode(BillingState.self, from: Data(json.utf8))
+        }
+
+        // Active Bedrock: the profile in effect.
+        XCTAssertEqual(
+            try state(#"{"mode":"bedrock:internal","kind":"bedrock","account":null,"awsProfile":"internal","accounts":[],"bedrockProfile":"internal","bedrockProfileSource":"settings"}"#).bedrockRowTitle,
+            "AWS Bedrock · internal"
+        )
+        // On a subscription, with an explicitly configured profile: deterministic, so name it.
+        XCTAssertEqual(
+            try state(#"{"mode":"sub:work","kind":"subscription","account":"work","awsProfile":null,"accounts":["work"],"bedrockProfile":"eaix-bedrock","bedrockProfileSource":"config"}"#).bedrockRowTitle,
+            "AWS Bedrock · eaix-bedrock"
+        )
+        // Inherited: depends on the launching environment, so never named.
+        XCTAssertEqual(
+            try state(#"{"mode":"sub:work","kind":"subscription","account":"work","awsProfile":null,"accounts":["work"],"bedrockProfile":null,"bedrockProfileSource":"inherited"}"#).bedrockRowTitle,
+            "AWS Bedrock · inherited profile"
+        )
+        // Older CLI without the field at all.
+        XCTAssertEqual(
+            try state(#"{"mode":"api","kind":"api","account":null,"awsProfile":null,"accounts":[]}"#).bedrockRowTitle,
+            "AWS Bedrock"
+        )
     }
 
     func testSubscriptionActionPassesTheAccountAsASeparateArgument() {
@@ -117,7 +143,8 @@ final class BillingStateTests: XCTestCase {
         func state(_ sessions: [SSOSessionState]) -> BillingState {
             BillingState(
                 mode: "bedrock:dev", kind: "bedrock", account: nil, awsProfile: "dev",
-                accounts: [], desktop: nil, awsSso: sessions
+                accounts: [], desktop: nil, awsSso: sessions,
+                bedrockProfile: nil, bedrockProfileSource: nil
             )
         }
 
@@ -162,6 +189,78 @@ final class BillingStateTests: XCTestCase {
     func testSSOLoginCommandDelegatesToTheCLI() {
         XCTAssertEqual(ManagementCommand.ssoLogin("admin").arguments, ["sso-login", "admin"])
         XCTAssertEqual(ManagementCommand.ssoLogin("admin").errorTitle, "Couldn’t Start the AWS SSO Login")
+    }
+
+    func testUsageDecodesAndSurfacesTheLimitClosestToBiting() throws {
+        let data = Data(#"""
+        [{"account":"work","status":"ok","fetchedAt":1786708800,"ageSeconds":0,
+          "limits":[{"kind":"session","group":"session","percent":72,"severity":"warning","resetsAt":null,"isActive":true},
+                    {"kind":"weekly_all","group":"weekly","percent":41,"severity":"normal","resetsAt":"2026-08-19T01:59:59.838154+00:00","isActive":true}],
+          "spend":{"percent":86,"used":17.2,"limit":20,"currency":"USD","severity":"warning"}},
+         {"account":"personal","status":"token-expired"}]
+        """#.utf8)
+
+        let usage = try JSONDecoder().decode([UsageAccount].self, from: data)
+
+        XCTAssertEqual(usage[0].headline?.kind, "session")
+        XCTAssertEqual(usage[0].headline?.percent, 72)
+        XCTAssertEqual(usage[0].limits?[0].name, "5-hour session")
+        XCTAssertEqual(usage[0].limits?[1].name, "Weekly · all models")
+        XCTAssertEqual(usage[0].spend?.menuTitle, "Extra usage credits · 86% (USD 17.20 of 20.00)")
+        XCTAssertNil(usage[0].problem)
+        XCTAssertEqual(usage[1].problem, "token expired — switch to this account to refresh")
+        XCTAssertFalse(usage[1].isOK)
+    }
+
+    func testTheFiveHourLimitIsAlwaysTheHeadline() {
+        func limit(_ kind: String, _ percent: Int) -> UsageLimit {
+            UsageLimit(kind: kind, percent: percent, severity: "normal", resetsAt: nil, isActive: true)
+        }
+        func account(_ limits: [UsageLimit]) -> UsageAccount {
+            UsageAccount(
+                account: "work", status: "ok", limits: limits, spend: nil,
+                ageSeconds: nil, staleReason: nil, detail: nil
+            )
+        }
+
+        // The session limit headlines even when a weekly limit is far higher.
+        XCTAssertEqual(
+            account([limit("weekly_all", 90), limit("session", 3)]).headline?.kind,
+            "session"
+        )
+        // With no session limit reported, the tightest remaining one stands in.
+        XCTAssertEqual(
+            account([limit("weekly_all", 90), limit("weekly_opus", 12)]).headline?.kind,
+            "weekly_all"
+        )
+        XCTAssertNil(account([]).headline)
+    }
+
+    func testUsageFailuresNeverReadAsZeroPercent() {
+        let unavailable = UsageAccount(
+            account: "work", status: "unavailable", limits: nil, spend: nil,
+            ageSeconds: nil, staleReason: nil, detail: "could not reach api.anthropic.com"
+        )
+
+        XCTAssertNil(unavailable.headline)
+        XCTAssertEqual(unavailable.problem, "could not reach api.anthropic.com")
+    }
+
+    func testUsageAgeNoteAppearsOnlyOnceFiguresAreStale() {
+        func account(age: Int?, reason: String? = nil) -> UsageAccount {
+            UsageAccount(
+                account: "work", status: "ok", limits: [], spend: nil,
+                ageSeconds: age, staleReason: reason, detail: nil
+            )
+        }
+
+        XCTAssertNil(account(age: nil).ageNote)
+        XCTAssertNil(account(age: 30).ageNote)
+        XCTAssertEqual(account(age: 600).ageNote, "cached 10 min ago")
+        XCTAssertEqual(
+            account(age: 7_200, reason: "api.anthropic.com returned HTTP 500").ageNote,
+            "cached 2h ago — api.anthropic.com returned HTTP 500"
+        )
     }
 
     func testAccountNameValidationMatchesTheCLI() {

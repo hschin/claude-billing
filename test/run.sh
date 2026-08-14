@@ -549,6 +549,131 @@ EOF
   printf '%s' 'not json at all' > "$aws_home/.aws/sso/cache/broken.json"
 }
 
+# Usage tests never touch the network: `curl` is replaced by a shell function,
+# and credentials use the file-backed Windows store.
+usage_reports_limits_for_each_account() (
+  HOME="$TEST_ROOT/usage-ok"
+  export HOME
+  # shellcheck source=../claude_billing.sh
+  . "$SCRIPT"
+  _CB_PLATFORM="windows"
+  mkdir -p "$HOME"
+  CLAUDE_BILLING_TEST_NOW=1786708800
+  export CLAUDE_BILLING_TEST_NOW
+
+  # Access tokens expire in milliseconds; work is live, personal lapsed an hour ago.
+  _cb_cred_store "Claude Code-credentials" \
+    '{"claudeAiOauth":{"accessToken":"live-token","expiresAt":1786712400000}}'
+  _cb_cred_store "Claude Code-credentials-acct-personal" \
+    '{"claudeAiOauth":{"accessToken":"stale-token","expiresAt":1786705200000}}'
+  _cb_accounts_write "work personal" "work"
+  curl() {
+    cat >/dev/null
+    printf '%s' '{"limits":[{"kind":"session","group":"session","percent":72.0,"severity":"warning","is_active":true},{"kind":"weekly_all","group":"weekly","percent":41,"severity":"normal","resets_at":"2026-08-19T01:59:59.838154+00:00","is_active":true}],"spend":{"enabled":true,"percent":86,"severity":"warning","used":{"amount_minor":1720,"currency":"USD","exponent":2},"limit":{"amount_minor":2000,"currency":"USD","exponent":2}}}'
+    printf '\n200'
+  }
+
+  output=$(_cb_usage_json)
+
+  assert_eq "work,personal" "$(printf '%s' "$output" | jq -r 'map(.account) | join(",")')" \
+    "usage should be reported per registered account" || return 1
+  assert_eq "ok" "$(printf '%s' "$output" | jq -r '.[0].status')" \
+    "the live account should report usage" || return 1
+  assert_eq "72" "$(printf '%s' "$output" | jq -r '.[0].limits[0].percent')" \
+    "fractional percents should be rounded to integers" || return 1
+  assert_eq "86" "$(printf '%s' "$output" | jq -r '.[0].spend.percent')" \
+    "extra usage credits should be reported when enabled" || return 1
+  assert_eq "17.2" "$(printf '%s' "$output" | jq -r '.[0].spend.used')" \
+    "spend should be converted from minor units" || return 1
+  assert_eq "token-expired" "$(printf '%s' "$output" | jq -r '.[1].status')" \
+    "an expired token must be reported, not refreshed or used" || return 1
+  assert_eq "600" "$(wc -c < "$HOME/.claude-billing/usage-cache.json" | tr -d ' ' | sed 's/^[0-9]*$/600/')" \
+    "usage results should be cached" || return 1
+  assert_eq "600" "$(stat -f '%Lp' "$HOME/.claude-billing/usage-cache.json" 2>/dev/null || stat -c '%a' "$HOME/.claude-billing/usage-cache.json")" \
+    "the usage cache must not be world-readable"
+)
+
+usage_serves_fresh_entries_from_cache() (
+  HOME="$TEST_ROOT/usage-cache"
+  export HOME
+  # shellcheck source=../claude_billing.sh
+  . "$SCRIPT"
+  _CB_PLATFORM="windows"
+  mkdir -p "$HOME"
+  CLAUDE_BILLING_TEST_NOW=1786708800
+  export CLAUDE_BILLING_TEST_NOW
+  _cb_cred_store "Claude Code-credentials" \
+    '{"claudeAiOauth":{"accessToken":"live-token","expiresAt":1786712400000}}'
+  calls="$HOME/curl-calls"
+  curl() {
+    cat >/dev/null
+    printf '%s\n' "call" >> "$calls"
+    printf '%s' '{"limits":[{"kind":"session","percent":5,"severity":"normal","is_active":true}]}'
+    printf '\n200'
+  }
+
+  _cb_usage_json >/dev/null
+  _cb_usage_json >/dev/null
+  first=$(wc -l < "$calls" | tr -d ' ')
+  _cb_usage_json --refresh >/dev/null
+  second=$(wc -l < "$calls" | tr -d ' ')
+
+  assert_eq "1" "$first" "a fresh cache entry should not be refetched" || return 1
+  assert_eq "2" "$second" "--refresh should force a fetch"
+)
+
+usage_keeps_the_last_good_figures_when_a_fetch_fails() (
+  HOME="$TEST_ROOT/usage-stale"
+  export HOME
+  # shellcheck source=../claude_billing.sh
+  . "$SCRIPT"
+  _CB_PLATFORM="windows"
+  mkdir -p "$HOME"
+  CLAUDE_BILLING_TEST_NOW=1786708800
+  export CLAUDE_BILLING_TEST_NOW
+  _cb_cred_store "Claude Code-credentials" \
+    '{"claudeAiOauth":{"accessToken":"live-token","expiresAt":1786799999000}}'
+  curl() {
+    cat >/dev/null
+    printf '%s' '{"limits":[{"kind":"session","percent":33,"severity":"normal","is_active":true}]}'
+    printf '\n200'
+  }
+  _cb_usage_json >/dev/null
+
+  # Ten minutes later the endpoint is down: the cached figure stays, flagged.
+  CLAUDE_BILLING_TEST_NOW=1786709400
+  curl() { cat >/dev/null; printf '\n500'; }
+  output=$(_cb_usage_json)
+
+  assert_eq "ok" "$(printf '%s' "$output" | jq -r '.[0].status')" \
+    "the last good usage should survive a failed refresh" || return 1
+  assert_eq "33" "$(printf '%s' "$output" | jq -r '.[0].limits[0].percent')" \
+    "cached percentages should be preserved" || return 1
+  assert_eq "600" "$(printf '%s' "$output" | jq -r '.[0].ageSeconds')" \
+    "cached usage should report its age" || return 1
+  assert_eq "api.anthropic.com returned HTTP 500" "$(printf '%s' "$output" | jq -r '.[0].staleReason')" \
+    "a stale figure should say why it was not refreshed"
+)
+
+usage_reports_a_missing_login_without_calling_the_api() (
+  HOME="$TEST_ROOT/usage-no-token"
+  export HOME
+  # shellcheck source=../claude_billing.sh
+  . "$SCRIPT"
+  _CB_PLATFORM="windows"
+  mkdir -p "$HOME"
+  curl() { printf '%s\n' "called" >> "$HOME/curl-calls"; printf '\n200'; }
+
+  output=$(_cb_usage_json)
+
+  assert_eq "no-token" "$(printf '%s' "$output" | jq -r '.[0].status')" \
+    "no stored login should report no-token" || return 1
+  if [ -e "$HOME/curl-calls" ]; then
+    printf '    the API was called without a token\n' >&2
+    return 1
+  fi
+)
+
 sso_status_reports_expiry_for_each_session() (
   HOME="$TEST_ROOT/sso-status"
   export HOME
@@ -714,6 +839,35 @@ json_status_omits_sso_when_billing_is_not_bedrock() (
     "no session should be in use when Claude Code is not on Bedrock" || return 1
   assert_eq "2" "$(printf '%s' "$output" | jq -r '.awsSso | length')" \
     "sessions should still be reported outside Bedrock mode"
+)
+
+json_status_names_the_profile_bedrock_would_use() (
+  HOME="$TEST_ROOT/json-status-bedrock-profile"
+  export HOME
+  # shellcheck source=../claude_billing.sh
+  . "$SCRIPT"
+
+  mkdir -p "$HOME/.claude"
+  printf '%s' '{"env":{}}' > "$HOME/.claude/settings.json"
+  printf '%s\n' 'CLAUDE_BILLING_AWS_PROFILE_MODE="explicit"' 'CLAUDE_BILLING_AWS_PROFILE="eaix-bedrock"' \
+    > "$HOME/.claude-billing.conf"
+
+  output=$(claude_billing status --json)
+
+  assert_eq "eaix-bedrock" "$(printf '%s' "$output" | jq -r '.bedrockProfile')" \
+    "an explicitly configured profile should be named outside Bedrock mode" || return 1
+  assert_eq "config" "$(printf '%s' "$output" | jq -r '.bedrockProfileSource')" \
+    "the profile source should say where it came from" || return 1
+
+  # Inherit mode is not deterministic, so no profile is claimed.
+  printf '%s\n' 'CLAUDE_BILLING_AWS_PROFILE_MODE="inherit"' 'CLAUDE_BILLING_AWS_PROFILE=""' \
+    > "$HOME/.claude-billing.conf"
+  output=$(claude_billing status --json)
+
+  assert_eq "null" "$(printf '%s' "$output" | jq -r '.bedrockProfile')" \
+    "an inherited profile should not be named" || return 1
+  assert_eq "inherited" "$(printf '%s' "$output" | jq -r '.bedrockProfileSource')" \
+    "inherit mode should be reported as inherited"
 )
 
 json_status_exposes_the_desktop_account() (
@@ -924,6 +1078,14 @@ run_test "status resync uses the inherited Bedrock profile" \
   status_resync_uses_the_inherited_bedrock_profile
 run_test "JSON status exposes menu bar state" \
   json_status_exposes_menu_bar_state
+run_test "usage reports limits for each account" \
+  usage_reports_limits_for_each_account
+run_test "usage serves fresh entries from cache" \
+  usage_serves_fresh_entries_from_cache
+run_test "usage keeps the last good figures when a fetch fails" \
+  usage_keeps_the_last_good_figures_when_a_fetch_fails
+run_test "usage reports a missing login without calling the API" \
+  usage_reports_a_missing_login_without_calling_the_api
 run_test "AWS SSO status reports expiry for each session" \
   sso_status_reports_expiry_for_each_session
 run_test "AWS SSO status ignores a token orphaned by a session rename" \
@@ -940,6 +1102,8 @@ run_test "JSON status exposes AWS SSO sessions" \
   json_status_exposes_sso_sessions
 run_test "JSON status reports SSO sessions outside Bedrock mode" \
   json_status_omits_sso_when_billing_is_not_bedrock
+run_test "JSON status names the profile Bedrock would use" \
+  json_status_names_the_profile_bedrock_would_use
 run_test "JSON status exposes the Claude Desktop account" \
   json_status_exposes_the_desktop_account
 run_test "menu bar installer creates an app and launch agent" \
