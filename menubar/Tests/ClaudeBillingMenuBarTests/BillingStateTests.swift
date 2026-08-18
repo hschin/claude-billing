@@ -427,3 +427,33 @@ final class UsageNotPolledTests: XCTestCase {
         XCTAssertFalse(account.isOK)
     }
 }
+
+final class UsageExpiredTokenTests: XCTestCase {
+    private func account(tokenExpired: Bool?) throws -> UsageAccount {
+        let flag = tokenExpired.map { "\"tokenExpired\": \($0)," } ?? ""
+        let json = """
+        {"account": "personal", "status": "ok", \(flag)
+         "limits": [{"kind": "session", "percent": 42, "severity": "normal", "isActive": true}],
+         "credits": {"balance": 65.0, "currency": "USD"}}
+        """
+        return try JSONDecoder().decode(UsageAccount.self, from: Data(json.utf8))
+    }
+
+    func testAnExpiredTokenMarksTheFiguresUnreliable() throws {
+        XCTAssertTrue(try account(tokenExpired: true).hasExpiredToken)
+    }
+
+    func testALiveTokenLeavesTheFiguresAlone() throws {
+        XCTAssertFalse(try account(tokenExpired: false).hasExpiredToken)
+    }
+
+    func testAMissingFlagIsNotTreatedAsExpired() throws {
+        // Older cached entries predate the flag; absent must mean "no news".
+        XCTAssertFalse(try account(tokenExpired: nil).hasExpiredToken)
+    }
+
+    func testTheCreditBalanceSurvivesAnExpiredToken() throws {
+        // Money in the account doesn't go stale the way a rolling window does.
+        XCTAssertNotNil(try account(tokenExpired: true).credits)
+    }
+}

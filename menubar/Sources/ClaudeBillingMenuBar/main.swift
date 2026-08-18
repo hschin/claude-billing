@@ -324,6 +324,14 @@ struct UsageAccount: Decodable, Equatable {
     let ageSeconds: Int?
     let staleReason: String?
     let detail: String?
+    /// The stored access token has expired. Any figures alongside it are the
+    /// last ones read before it lapsed, so they are shown as unreliable rather
+    /// than removed — knowing roughly where you stood still beats a blank.
+    /// `var` with a default so existing callers and older cached entries that
+    /// predate the flag still construct and decode.
+    var tokenExpired: Bool?
+
+    var hasExpiredToken: Bool { tokenExpired == true }
 
     var displayName: String { account.isEmpty ? "Subscription" : account }
     var isOK: Bool { status == "ok" }
@@ -965,24 +973,57 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
 
     /// A metered detail row: the bar in the icon column, then the percentage in
     /// monospaced digits so the numbers align, then the label.
-    private func meterItem(percent: Int, level: UsageLevel, label: String) -> NSMenuItem {
+    /// `isStale` is for figures that can no longer be trusted — an account whose
+    /// token has expired. The bar goes grey and the number blanks out, because a
+    /// stale percentage displayed as a live one is worse than no percentage; the
+    /// row stays, so the limit is still named and accounted for.
+    private func meterItem(
+        percent: Int,
+        level: UsageLevel,
+        label: String,
+        isStale: Bool = false
+    ) -> NSMenuItem {
         let shown = min(max(percent, 0), 100)
-        let percentText = String(format: "%3d%%  ", shown)
+        let percentText = isStale ? "  —  " : String(format: "%3d%%  ", shown)
         let item = NSMenuItem(title: percentText + label, action: nil, keyEquivalent: "")
         item.isEnabled = false
-        item.image = usageBarImage(percent: percent, color: level.color)
+        item.image = usageBarImage(
+            percent: percent,
+            color: isStale ? .tertiaryLabelColor : level.color
+        )
 
         let attributed = NSMutableAttributedString(string: percentText, attributes: [
             .font: NSFont.monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .medium),
-            .foregroundColor: NSColor.labelColor,
+            .foregroundColor: isStale ? NSColor.tertiaryLabelColor : NSColor.labelColor,
         ])
         attributed.append(NSAttributedString(string: label, attributes: [
             .font: NSFont.menuFont(ofSize: NSFont.smallSystemFontSize),
-            .foregroundColor: NSColor.secondaryLabelColor,
+            .foregroundColor: isStale ? NSColor.tertiaryLabelColor : NSColor.secondaryLabelColor,
         ]))
         item.attributedTitle = attributed
-        item.toolTip = label
-        item.setAccessibilityLabel("\(label): \(shown) percent used")
+        item.toolTip = isStale ? "\(label) — last known figure, not current" : label
+        item.setAccessibilityLabel(isStale
+            ? "\(label): unknown, access token expired"
+            : "\(label): \(shown) percent used")
+        return item
+    }
+
+    /// A problem worth acting on, under the figures it explains. Orange rather
+    /// than the secondary grey of a detail row: this one is asking for something.
+    private func alertItem(title: String) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        item.isEnabled = false
+        let attributed = NSMutableAttributedString()
+        attributed.append(symbolAttachment(
+            named: "exclamationmark.triangle.fill",
+            color: .systemOrange,
+            pointSize: NSFont.smallSystemFontSize
+        ))
+        attributed.append(NSAttributedString(string: " " + title, attributes: [
+            .font: NSFont.menuFont(ofSize: NSFont.smallSystemFontSize),
+            .foregroundColor: NSColor.systemOrange,
+        ]))
+        item.attributedTitle = attributed
         return item
     }
 
@@ -1112,22 +1153,33 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                 submenu.addItem(detailItem(title: problem))
                 continue
             }
+            // An expired token makes the percentages historical, but not the
+            // credit balance: money in the account doesn't go stale the way a
+            // rolling window does.
+            let isStale = account.hasExpiredToken
             for limit in account.limits ?? [] {
                 submenu.addItem(meterItem(
                     percent: limit.percent,
                     level: limit.level,
-                    label: limit.detailLabel
+                    label: limit.detailLabel,
+                    isStale: isStale
                 ))
             }
             if let spend = account.spend {
                 submenu.addItem(meterItem(
                     percent: spend.percent,
                     level: spend.level,
-                    label: spend.detailLabel
+                    label: spend.detailLabel,
+                    isStale: isStale
                 ))
             }
             if let credits = account.credits {
                 submenu.addItem(detailItem(title: credits.detailLabel))
+            }
+            if isStale {
+                submenu.addItem(alertItem(
+                    title: "Access token expired — switch to this account to refresh it"
+                ))
             }
             if let ageNote = account.ageNote {
                 submenu.addItem(detailItem(title: ageNote))

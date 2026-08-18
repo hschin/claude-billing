@@ -1009,6 +1009,19 @@ _cb_usage_fetch_one() {
 # ~/.claude-billing/usage-cache.json unless an entry is older than the TTL.
 # --refresh forces a fetch. Cached entries carry ageSeconds so callers can say
 # how stale a figure is.
+# Whether an account's stored access token has already expired. A local,
+# read-only check: it lets the menu mark figures as unreliable even for an
+# account it deliberately didn't poll, without spending a request to be told.
+_cb_usage_token_expired() {
+  local name="${1:-}" creds expires_ms now_ms
+  creds=$(_cb_usage_credentials "$name")
+  [[ -n "$creds" ]] || { printf 'false'; return 0; }
+  expires_ms=$(printf '%s' "$creds" | jq -r '.claudeAiOauth.expiresAt // empty' 2>/dev/null)
+  [[ "$expires_ms" =~ ^[0-9]+$ ]] || { printf 'false'; return 0; }
+  now_ms=$(( $(_cb_now) * 1000 ))
+  if (( expires_ms <= now_ms )); then printf 'true'; else printf 'false'; fi
+}
+
 # _cb_usage_json [--refresh] [only-account]
 #
 # `only-account` restricts NETWORK calls to that one account; the others are
@@ -1036,7 +1049,9 @@ _cb_usage_json() {
       age=$(( now - fetched_at ))
     fi
     if [[ "$force" != "--refresh" ]] && [[ -n "$age" ]] && (( age < ttl )); then
-      out="${out}$(printf '%s' "$entry" | jq -c --argjson age "$age" '. + {ageSeconds: $age}')"
+      out="${out}$(printf '%s' "$entry" | jq -c --argjson age "$age" \
+        --argjson expired "$(_cb_usage_token_expired "$name")" \
+        '. + {ageSeconds: $age, tokenExpired: $expired}')"
       continue
     fi
     # A rate limit is a request to stop asking, so it outranks --refresh: the
@@ -1052,7 +1067,8 @@ _cb_usage_json() {
       retry_note="rate limited by api.anthropic.com — retrying in $(( (retry_in + 59) / 60 )) min"
       if [[ -n "$entry" ]]; then
         out="${out}$(printf '%s' "$entry" | jq -c --argjson age "${age:-0}" --arg why "$retry_note" \
-          '. + {ageSeconds: $age, staleReason: $why}')"
+          --argjson expired "$(_cb_usage_token_expired "$name")" \
+          '. + {ageSeconds: $age, staleReason: $why, tokenExpired: $expired}')"
       else
         out="${out}$(jq -n --arg account "$name" --arg why "$retry_note" \
           '{account: $account, status: "unavailable", detail: $why}')"
@@ -1067,7 +1083,9 @@ _cb_usage_json() {
     fi
     if [[ -n "$skip" ]]; then
       if [[ -n "$entry" ]]; then
-        out="${out}$(printf '%s' "$entry" | jq -c --argjson age "${age:-0}" '. + {ageSeconds: $age}')"
+        out="${out}$(printf '%s' "$entry" | jq -c --argjson age "${age:-0}" \
+          --argjson expired "$(_cb_usage_token_expired "$name")" \
+          '. + {ageSeconds: $age, tokenExpired: $expired}')"
       else
         out="${out}$(jq -n --arg account "$name" '{account: $account, status: "not-polled"}')"
       fi
@@ -1095,7 +1113,9 @@ _cb_usage_json() {
     # retryAfter is a property of the failed request rather than the figures.
     cache=$(printf '%s' "$cache" | jq -c --arg k "$key" \
       --argjson v "$(printf '%s' "$entry" | jq -c 'del(.ageSeconds, .staleReason, .retryAfter)')" '.[$k] = $v')
-    out="${out}$(printf '%s' "$entry" | jq -c '. + {ageSeconds: (.ageSeconds // 0)}')"
+    out="${out}$(printf '%s' "$entry" | jq -c \
+      --argjson expired "$(_cb_usage_token_expired "$name")" \
+      '. + {ageSeconds: (.ageSeconds // 0), tokenExpired: $expired}')"
   done
   mkdir -p "$(dirname "$cache_file")" 2>/dev/null
   if printf '%s' "$cache" > "${cache_file}.tmp" 2>/dev/null; then
@@ -1136,6 +1156,9 @@ _cb_usage_lines() {
       ( if .spend != null then
           (.spend.currency | symbol) as $sym |
           "    Usage credits: \(.spend.percent)% used — \($sym)\(.spend.used | money) of \($sym)\(.spend.limit | money)"
+        else empty end ),
+      ( if .tokenExpired == true then
+          "    ! access token expired — switch to this account to refresh it"
         else empty end ),
       ( if (.ageSeconds // 0) > 60 then
           "    (cached \((.ageSeconds / 60) | floor) min ago\(if .staleReason != null then ": \(.staleReason)" else "" end))"

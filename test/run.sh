@@ -587,6 +587,10 @@ usage_reports_limits_for_each_account() (
     "spend should be converted from minor units" || return 1
   assert_eq "token-expired" "$(printf '%s' "$output" | jq -r '.[1].status')" \
     "an expired token must be reported, not refreshed or used" || return 1
+  # Checked locally from the stored credential, so it is known even for an
+  # account no request was spent on.
+  assert_eq "true" "$(printf '%s' "$output" | jq -r '.[1].tokenExpired')" \
+    "an expired token should be flagged for the menu to grey out" || return 1
   assert_eq "600" "$(wc -c < "$HOME/.claude-billing/usage-cache.json" | tr -d ' ' | sed 's/^[0-9]*$/600/')" \
     "usage results should be cached" || return 1
   assert_eq "600" "$(stat -f '%Lp' "$HOME/.claude-billing/usage-cache.json" 2>/dev/null || stat -c '%a' "$HOME/.claude-billing/usage-cache.json")" \
@@ -774,6 +778,8 @@ usage_polls_only_the_account_in_use() (
     "the active account should report usage" || return 1
   assert_eq "not-polled" "$(printf '%s' "$output" | jq -r '.[1].status')" \
     "an unpolled account with nothing cached should say so" || return 1
+  assert_eq "false" "$(printf '%s' "$output" | jq -r '.[0].tokenExpired')" \
+    "a live token should not be reported as expired" || return 1
 
   # A later restricted read serves the inactive account from cache rather than
   # forgetting what it already knew.
