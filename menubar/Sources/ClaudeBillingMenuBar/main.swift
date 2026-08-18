@@ -705,110 +705,6 @@ private extension CommandResult {
     }
 }
 
-/// A menu row that runs its action WITHOUT dismissing the menu.
-///
-/// AppKit has no switch for this: selecting an ordinary `NSMenuItem` always
-/// closes the menu. A custom view keeps the click to itself, so `Refresh` can
-/// reload the figures while you watch them change. Because the view owns its
-/// whole row, it also owns the layout — `iconX`/`textX` exist to line this row
-/// up with AppKit's own rows and are the knobs to turn if it ever drifts.
-final class StayOpenMenuItemView: NSView {
-    private let handler: () -> Void
-    private let symbolName: String
-    private var title: String
-    private var isRowEnabled: Bool
-    private var isHighlighted = false
-
-    private let iconX: CGFloat = 13
-    private let textX: CGFloat = 34
-    private let iconSize: CGFloat = 14
-
-    init(title: String, symbolName: String, isEnabled: Bool, width: CGFloat, handler: @escaping () -> Void) {
-        self.title = title
-        self.symbolName = symbolName
-        self.isRowEnabled = isEnabled
-        self.handler = handler
-        super.init(frame: NSRect(x: 0, y: 0, width: width, height: 22))
-        setAccessibilityRole(.button)
-        setAccessibilityLabel(title)
-    }
-
-    required init?(coder: NSCoder) { fatalError("not used") }
-
-    /// Shows work in progress in place, since the menu is still on screen to
-    /// show it in.
-    func setTitle(_ newTitle: String, isEnabled: Bool) {
-        title = newTitle
-        isRowEnabled = isEnabled
-        setAccessibilityLabel(newTitle)
-        needsDisplay = true
-    }
-
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        trackingAreas.forEach(removeTrackingArea)
-        addTrackingArea(NSTrackingArea(
-            rect: .zero,
-            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
-            owner: self
-        ))
-    }
-
-    override func mouseEntered(with event: NSEvent) {
-        isHighlighted = isRowEnabled
-        needsDisplay = true
-    }
-
-    override func mouseExited(with event: NSEvent) {
-        isHighlighted = false
-        needsDisplay = true
-    }
-
-    override func mouseUp(with event: NSEvent) {
-        guard isRowEnabled, bounds.contains(convert(event.locationInWindow, from: nil)) else { return }
-        handler()
-    }
-
-    override func draw(_ dirtyRect: NSRect) {
-        let foreground: NSColor = !isRowEnabled
-            ? .disabledControlTextColor
-            : (isHighlighted ? .selectedMenuItemTextColor : .labelColor)
-
-        if isHighlighted {
-            NSColor.selectedContentBackgroundColor.setFill()
-            NSBezierPath(
-                roundedRect: bounds.insetBy(dx: 5, dy: 1),
-                xRadius: 4,
-                yRadius: 4
-            ).fill()
-        }
-
-        if let symbol = NSImage(systemSymbolName: symbolName, accessibilityDescription: title) {
-            symbol.isTemplate = true
-            let tinted = NSImage(size: NSSize(width: iconSize, height: iconSize), flipped: false) { rect in
-                symbol.draw(in: rect)
-                foreground.set()
-                rect.fill(using: .sourceAtop)
-                return true
-            }
-            tinted.draw(in: NSRect(
-                x: iconX,
-                y: (bounds.height - iconSize) / 2,
-                width: iconSize,
-                height: iconSize
-            ))
-        }
-
-        let font = NSFont.menuFont(ofSize: 0)
-        let text = NSAttributedString(string: title, attributes: [
-            .font: font,
-            .foregroundColor: foreground,
-        ])
-        let textHeight = text.size().height
-        text.draw(at: NSPoint(x: textX, y: (bounds.height - textHeight) / 2))
-    }
-}
-
 private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let client = BillingClient()
     private var statusItem: NSStatusItem!
@@ -831,9 +727,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     /// an open menu to say the same thing again.
     private var lastErrorMessage: String?
     private var progressIndicator: NSProgressIndicator?
-    /// The Refresh row, kept so an in-place refresh can say it is working
-    /// without rebuilding (and so relaying out) the menu that is on screen.
-    private weak var refreshRowView: StayOpenMenuItemView?
+    /// When Refresh was last clicked, so the menu can be put back up once the
+    /// new figures are in. A time rather than a flag: if the fetch that would
+    /// have reopened it never runs, a later timer tick must not pop the menu
+    /// open in the user's face minutes afterwards.
+    private var refreshClickedAt: Date?
+    private let reopenWindow: TimeInterval = 10
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -861,24 +760,26 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         usageTimer?.invalidate()
     }
 
-    private func refreshUsage(force: Bool) {
-        guard !isLoadingUsage else { return }
+    /// Returns whether a fetch actually started; a caller waiting on the result
+    /// needs to know when there is nothing to wait for.
+    @discardableResult
+    private func refreshUsage(force: Bool) -> Bool {
+        guard !isLoadingUsage else { return false }
         isLoadingUsage = true
         client.loadUsage(refresh: force) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.isLoadingUsage = false
-                // A failed fetch rebuilds nothing, so the row would otherwise
-                // stay stuck on "Refreshing…".
-                self.refreshRowView?.setTitle("Refresh", isEnabled: !self.isSwitching)
                 // A usage failure is not worth an alert; the row says so itself.
                 if case let .success(usage) = result {
                     self.usage = usage
                     self.lastUsageFetch = Date()
                     self.rebuildMenu()
                 }
+                self.reopenMenuIfRequested()
             }
         }
+        return true
     }
 
     /// The background beat is slow on purpose; opening the menu is the moment
@@ -999,28 +900,15 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         // behaviour for a key equivalent, and pressing a shortcut reads as
         // "do it and get out of my way" anyway.
         let refreshItem = NSMenuItem(title: "Refresh", action: #selector(refreshClicked), keyEquivalent: "r")
+        refreshItem.image = menuImage(named: "arrow.clockwise", description: "Refresh")
         refreshItem.target = self
         refreshItem.isEnabled = !isSwitching
-        let refreshView = StayOpenMenuItemView(
-            title: isLoadingUsage ? "Refreshing…" : "Refresh",
-            symbolName: "arrow.clockwise",
-            isEnabled: !isSwitching && !isLoadingUsage,
-            width: 0
-        ) { [weak self] in self?.refreshInPlace() }
-        refreshItem.view = refreshView
-        self.refreshRowView = refreshView
         menu.addItem(refreshItem)
 
         let quitItem = NSMenuItem(title: "Quit Claude Billing", action: #selector(quitClicked), keyEquivalent: "q")
         quitItem.image = menuImage(named: "power", description: "Quit")
         quitItem.target = self
         menu.addItem(quitItem)
-
-        // A view-based item doesn't stretch on its own, and the menu's width is
-        // only known once every other row has been measured.
-        if let refreshRowView {
-            refreshRowView.frame.size.width = max(menu.size.width, 180)
-        }
     }
 
     private func sectionItem(title: String) -> NSMenuItem {
@@ -1330,17 +1218,28 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     }
 
     @objc private func refreshClicked() {
+        // AppKit dismisses the menu the moment an item is selected, and there is
+        // no opt-out for an ordinary item — a custom view could keep the click,
+        // but then the menu's own tracking eats it and nothing runs at all. So
+        // let it close and put it straight back up with the new figures in it.
+        refreshClickedAt = Date()
         refreshState(showError: true)
-        refreshUsage(force: true)
+        if !refreshUsage(force: true) {
+            // Nothing to wait for: a fetch was already in flight, so put the
+            // menu back up now rather than hanging on its completion.
+            reopenMenuIfRequested()
+        }
     }
 
-    /// Refresh from the still-open menu: report progress in the row itself, and
-    /// let the completion handlers rebuild the rows around it.
-    private func refreshInPlace() {
-        guard !isLoadingUsage else { return }
-        refreshRowView?.setTitle("Refreshing…", isEnabled: false)
-        refreshState(showError: false)
-        refreshUsage(force: true)
+    /// Reopens the menu after a Refresh, once the slow half (the usage network
+    /// call) has landed, so it comes back showing the new numbers rather than
+    /// the old ones. Never reopens for a timer tick or a switch — only for the
+    /// click that asked for it.
+    private func reopenMenuIfRequested() {
+        guard let clickedAt = refreshClickedAt, !isSwitching else { return }
+        refreshClickedAt = nil
+        guard Date().timeIntervalSince(clickedAt) < reopenWindow else { return }
+        statusItem.button?.performClick(nil)
     }
 
 
