@@ -390,3 +390,30 @@ final class UsageLevelIconTests: XCTestCase {
         XCTAssertEqual(icon.size, NSSize(width: 15, height: 13))
     }
 }
+
+final class UsageRefreshFailureTests: XCTestCase {
+    private func account(status: String, staleReason: String?) throws -> UsageAccount {
+        let reason = staleReason.map { "\"staleReason\": \"\($0)\"," } ?? ""
+        let json = """
+        {"account": "personal", "status": "\(status)", \(reason)
+         "limits": [{"kind": "session", "percent": 42, "severity": "normal", "isActive": true}]}
+        """
+        return try JSONDecoder().decode(UsageAccount.self, from: Data(json.utf8))
+    }
+
+    func testAFailedRefreshOverReadableFiguresIsReported() throws {
+        let stale = try account(status: "ok", staleReason: "rate limited by api.anthropic.com")
+        XCTAssertEqual(stale.refreshFailure, "rate limited by api.anthropic.com")
+    }
+
+    func testFreshFiguresReportNoFailure() throws {
+        XCTAssertNil(try account(status: "ok", staleReason: nil).refreshFailure)
+    }
+
+    func testAnUnreadableAccountReportsThroughProblemNotRefreshFailure() throws {
+        // Otherwise the row would say the same thing twice, in two places.
+        let broken = try account(status: "unavailable", staleReason: "rate limited")
+        XCTAssertNil(broken.refreshFailure)
+        XCTAssertNotNil(broken.problem)
+    }
+}

@@ -902,6 +902,9 @@ _cb_usage_fetch_one() {
     jq -n --arg account "$name" --arg code "$http_status" \
       '{account: $account, status: "unavailable",
         detail: (if $code == "" or $code == "000" then "could not reach api.anthropic.com"
+                 elif $code == "429" then "rate limited by api.anthropic.com \u2014 try again shortly"
+                 elif $code == "401" or $code == "403" then "api.anthropic.com rejected the login (HTTP \($code))"
+                 elif ($code | startswith("5")) then "api.anthropic.com is having trouble (HTTP \($code))"
                  else "api.anthropic.com returned HTTP \($code)" end)}'
     return 0
   fi

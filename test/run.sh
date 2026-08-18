@@ -638,6 +638,32 @@ usage_reports_the_prepaid_credit_balance() (
     "plan limits should still be reported alongside credits"
 )
 
+usage_names_a_rate_limit_rather_than_a_bare_status_code() (
+  HOME="$TEST_ROOT/usage-429"
+  export HOME
+  # shellcheck source=../claude_billing.sh
+  . "$SCRIPT"
+  _CB_PLATFORM="windows"
+  mkdir -p "$HOME"
+  CLAUDE_BILLING_TEST_NOW=1786708800
+  export CLAUDE_BILLING_TEST_NOW
+  _cb_cred_store "Claude Code-credentials" \
+    '{"claudeAiOauth":{"accessToken":"live-token","expiresAt":1786712400000}}'
+  # A bare "HTTP 429" reads as a bug in claude-billing; being rate limited is
+  # something the user can act on, so say that instead.
+  curl() { cat > /dev/null; printf '\n429'; }
+
+  output=$(_cb_usage_json)
+
+  assert_eq "unavailable" "$(printf '%s' "$output" | jq -r '.[0].status')" \
+    "a 429 should report as unavailable" || return 1
+  case "$(printf '%s' "$output" | jq -r '.[0].detail')" in
+    *"rate limited"*) : ;;
+    *) printf 'expected a rate-limit message, got: %s\n' \
+         "$(printf '%s' "$output" | jq -r '.[0].detail')"; return 1 ;;
+  esac
+)
+
 usage_survives_a_credits_endpoint_failure() (
   HOME="$TEST_ROOT/usage-credits-fail"
   export HOME
@@ -761,7 +787,7 @@ usage_keeps_the_last_good_figures_when_a_fetch_fails() (
     "cached percentages should be preserved" || return 1
   assert_eq "600" "$(printf '%s' "$output" | jq -r '.[0].ageSeconds')" \
     "cached usage should report its age" || return 1
-  assert_eq "api.anthropic.com returned HTTP 500" "$(printf '%s' "$output" | jq -r '.[0].staleReason')" \
+  assert_eq "api.anthropic.com is having trouble (HTTP 500)" "$(printf '%s' "$output" | jq -r '.[0].staleReason')" \
     "a stale figure should say why it was not refreshed"
 )
 
@@ -1192,6 +1218,8 @@ run_test "usage reports limits for each account" \
   usage_reports_limits_for_each_account
 run_test "usage reports the prepaid credit balance" \
   usage_reports_the_prepaid_credit_balance
+run_test "usage names a rate limit rather than a bare status code" \
+  usage_names_a_rate_limit_rather_than_a_bare_status_code
 run_test "usage survives a credits endpoint failure" \
   usage_survives_a_credits_endpoint_failure
 run_test "usage skips credits without an account identity" \

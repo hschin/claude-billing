@@ -100,6 +100,27 @@ enum UsageLevel {
     }
 }
 
+/// An inline symbol for use mid-sentence in a menu title — a warning glyph
+/// beside the reason a refresh failed, where a row's single image slot is
+/// already spending itself on something else.
+func symbolAttachment(named name: String, color: NSColor, pointSize: CGFloat) -> NSAttributedString {
+    let configuration = NSImage.SymbolConfiguration(pointSize: pointSize, weight: .semibold)
+    guard let symbol = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
+        .withSymbolConfiguration(configuration) else { return NSAttributedString(string: "") }
+    let size = symbol.size
+    let tinted = NSImage(size: size, flipped: false) { rect in
+        symbol.draw(in: rect)
+        color.set()
+        rect.fill(using: .sourceAtop)
+        return true
+    }
+    tinted.isTemplate = false
+    let attachment = NSTextAttachment()
+    attachment.image = tinted
+    attachment.bounds = CGRect(x: 0, y: -1, width: size.width, height: size.height)
+    return NSAttributedString(attachment: attachment)
+}
+
 /// The three-bar chart icon on the `Plan usage` row, lit to match the level: one
 /// green bar, two orange, three red. This replaces a separate progress bar in
 /// that row - the icon column was already spending its width saying "usage", so
@@ -322,6 +343,15 @@ struct UsageAccount: Decodable, Equatable {
         case "no-token": return "no stored login"
         default: return detail ?? "usage unavailable"
         }
+    }
+
+    /// A refresh that failed while readable figures are still on screen. The
+    /// numbers are real, just older than they should be, so the row has to say
+    /// so — otherwise a failed refresh is indistinguishable from a refresh that
+    /// silently did nothing.
+    var refreshFailure: String? {
+        guard isOK, let staleReason, !staleReason.isEmpty else { return nil }
+        return staleReason
     }
 
     var ageNote: String? {
@@ -1043,9 +1073,29 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                 .font: NSFont.menuFont(ofSize: NSFont.smallSystemFontSize),
                 .foregroundColor: NSColor.secondaryLabelColor,
             ]))
+            // A failed refresh has to be visible here, or clicking Refresh and
+            // seeing the same number reads as Refresh being broken.
+            if let failure = active.refreshFailure {
+                attributed.append(NSAttributedString(string: " \u{b7} "))
+                attributed.append(symbolAttachment(
+                    named: "exclamationmark.triangle.fill",
+                    color: .systemOrange,
+                    pointSize: NSFont.smallSystemFontSize
+                ))
+                attributed.append(NSAttributedString(string: " " + failure, attributes: [
+                    .font: NSFont.menuFont(ofSize: NSFont.smallSystemFontSize),
+                    .foregroundColor: NSColor.secondaryLabelColor,
+                ]))
+            }
             item.attributedTitle = attributed
-            item.toolTip = "\(active.displayName): \(headline.detailLabel) · \(headline.percent)% used"
-            item.setAccessibilityLabel("Plan usage: \(headline.detailLabel), \(headline.percent) percent used")
+            var tooltip = "\(active.displayName): \(headline.detailLabel) · \(headline.percent)% used"
+            if let failure = active.refreshFailure {
+                tooltip += "\nLast refresh failed: \(failure). The figures shown are the last good ones."
+            }
+            item.toolTip = tooltip
+            item.setAccessibilityLabel(active.refreshFailure.map {
+                "Plan usage: \(headline.detailLabel), \(headline.percent) percent used. Refresh failed: \($0)"
+            } ?? "Plan usage: \(headline.detailLabel), \(headline.percent) percent used")
         } else if let active, let problem = active.problem {
             item.title = "Plan usage · \(problem.split(separator: "—").first?.trimmingCharacters(in: .whitespaces) ?? problem)"
             item.image = menuImage(named: "exclamationmark.triangle.fill", description: "Plan usage unavailable")
