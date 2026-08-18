@@ -341,6 +341,7 @@ struct UsageAccount: Decodable, Equatable {
         case "ok": return nil
         case "token-expired": return "token expired — switch to this account to refresh"
         case "no-token": return "no stored login"
+        case "not-polled": return "not checked — only the account in use is polled"
         default: return detail ?? "usage unavailable"
         }
     }
@@ -642,7 +643,9 @@ private final class BillingClient {
     /// Reads the shell utility's usage cache; it only reaches the network when
     /// an entry is stale, or when `refresh` forces it.
     func loadUsage(refresh: Bool, completion: @escaping (Result<[UsageAccount], Error>) -> Void) {
-        run(arguments: ["usage", "--json"] + (refresh ? ["--refresh"] : [])) { result in
+        // --active: only the account in use gets a network call. The endpoint
+        // rate-limits, and an account you are not on is not spending anything.
+        run(arguments: ["usage", "--json", "--active"] + (refresh ? ["--refresh"] : [])) { result in
             guard result.status == 0 else {
                 completion(.failure(BillingClientError.commandFailed(result.message)))
                 return
@@ -1075,17 +1078,16 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             ]))
             // A failed refresh has to be visible here, or clicking Refresh and
             // seeing the same number reads as Refresh being broken.
-            if let failure = active.refreshFailure {
-                attributed.append(NSAttributedString(string: " \u{b7} "))
+            // The glyph alone: enough to say "that number is older than it
+            // looks", without a sentence of API detail in the row. The
+            // reason belongs to the tooltip and the submenu.
+            if active.refreshFailure != nil {
+                attributed.append(NSAttributedString(string: " "))
                 attributed.append(symbolAttachment(
                     named: "exclamationmark.triangle.fill",
                     color: .systemOrange,
                     pointSize: NSFont.smallSystemFontSize
                 ))
-                attributed.append(NSAttributedString(string: " " + failure, attributes: [
-                    .font: NSFont.menuFont(ofSize: NSFont.smallSystemFontSize),
-                    .foregroundColor: NSColor.secondaryLabelColor,
-                ]))
             }
             item.attributedTitle = attributed
             var tooltip = "\(active.displayName): \(headline.detailLabel) · \(headline.percent)% used"

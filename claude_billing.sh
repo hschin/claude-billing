@@ -939,9 +939,17 @@ _cb_usage_fetch_one() {
 # ~/.claude-billing/usage-cache.json unless an entry is older than the TTL.
 # --refresh forces a fetch. Cached entries carry ageSeconds so callers can say
 # how stale a figure is.
+# _cb_usage_json [--refresh] [only-account]
+#
+# `only-account` restricts NETWORK calls to that one account; the others are
+# served from cache, or reported as `not-polled` if nothing is cached. The
+# endpoint rate-limits (HTTP 429), and an account you are not using is not
+# spending its limits, so polling it buys nothing and costs the request budget
+# of the account you actually care about. Pass "-" for the legacy, account-less
+# entry.
 _cb_usage_json() {
-  local force="${1:-}" ttl="${CLAUDE_BILLING_USAGE_TTL:-300}" cache_file cache entry name now
-  local names="" out="" fetched_at age
+  local force="${1:-}" only="${2:-}" ttl="${CLAUDE_BILLING_USAGE_TTL:-300}" cache_file cache entry name now
+  local names="" out="" fetched_at age skip
   cache_file=$(_cb_usage_cache_file)
   now=$(_cb_now)
   cache='{}'
@@ -958,6 +966,20 @@ _cb_usage_json() {
     fi
     if [[ "$force" != "--refresh" ]] && [[ -n "$age" ]] && (( age < ttl )); then
       out="${out}$(printf '%s' "$entry" | jq -c --argjson age "$age" '. + {ageSeconds: $age}')"
+      continue
+    fi
+    skip=""
+    if [[ -n "$only" ]]; then
+      # "-" stands for the legacy account-less entry, whose name is empty.
+      [[ "$only" == "-" ]] && only=""
+      [[ "$name" != "$only" ]] && skip="yes"
+    fi
+    if [[ -n "$skip" ]]; then
+      if [[ -n "$entry" ]]; then
+        out="${out}$(printf '%s' "$entry" | jq -c --argjson age "${age:-0}" '. + {ageSeconds: $age}')"
+      else
+        out="${out}$(jq -n --arg account "$name" '{account: $account, status: "not-polled"}')"
+      fi
       continue
     fi
     entry=$(_cb_usage_fetch_one "$name")
@@ -1021,6 +1043,9 @@ _cb_usage_lines() {
       "\($head) access token expired — switch to this account to refresh it"
     elif .status == "no-token" then
       "\($head) no stored login"
+    elif .status == "not-polled" then
+      "\($head) not checked — only the account in use is polled"
+
     else
       "\($head) unavailable (\(.detail // "unknown error"))"
     end'
@@ -1429,10 +1454,19 @@ claude_billing() {
     usage)
       _cb_require_cmd jq "install with: brew install jq / apt install jq / winget install jqlang.jq" || return 1
       _cb_require_cmd curl "install curl first" || return 1
-      local usage_json usage_force=""
-      [[ "${2:-}" == "--refresh" || "${3:-}" == "--refresh" ]] && usage_force="--refresh"
-      usage_json=$(_cb_usage_json "$usage_force") || return 1
-      if [[ "${2:-}" == "--json" || "${3:-}" == "--json" ]]; then
+      local usage_json usage_force="" usage_only="" usage_as_json="" usage_arg
+      shift
+      for usage_arg in "$@"; do
+        case "$usage_arg" in
+          --refresh) usage_force="--refresh" ;;
+          --json) usage_as_json="yes" ;;
+          # Only the account in use is worth a request; see _cb_usage_json.
+          --active) usage_only=$(_cb_active_get); [[ -n "$usage_only" ]] || usage_only="-" ;;
+          *) echo "claude-billing usage: unknown option $usage_arg" >&2; return 1 ;;
+        esac
+      done
+      usage_json=$(_cb_usage_json "$usage_force" "$usage_only") || return 1
+      if [[ -n "$usage_as_json" ]]; then
         printf '%s\n' "$usage_json"
         return 0
       fi

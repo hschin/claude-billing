@@ -638,6 +638,51 @@ usage_reports_the_prepaid_credit_balance() (
     "plan limits should still be reported alongside credits"
 )
 
+usage_polls_only_the_account_in_use() (
+  HOME="$TEST_ROOT/usage-active-only"
+  export HOME
+  # shellcheck source=../claude_billing.sh
+  . "$SCRIPT"
+  _CB_PLATFORM="windows"
+  mkdir -p "$HOME"
+  CLAUDE_BILLING_TEST_NOW=1786708800
+  export CLAUDE_BILLING_TEST_NOW
+  _cb_cred_store "Claude Code-credentials" \
+    '{"claudeAiOauth":{"accessToken":"live-token","expiresAt":1786712400000}}'
+  _cb_cred_store "Claude Code-credentials-acct-personal" \
+    '{"claudeAiOauth":{"accessToken":"other-token","expiresAt":1786712400000}}'
+  _cb_accounts_write "work personal" "work"
+  # The endpoint rate-limits, so an account that is not spending anything must
+  # not cost a request. Count the calls to prove it.
+  printf '0' > "$HOME/calls"
+  curl() {
+    cat >/dev/null
+    printf '%s' "$(( $(cat "$HOME/calls") + 1 ))" > "$HOME/calls"
+    printf '%s' '{"limits":[{"kind":"session","percent":12,"severity":"normal","is_active":true}]}'
+    printf '\n200'
+  }
+
+  output=$(_cb_usage_json "" "work")
+
+  assert_eq "1" "$(cat "$HOME/calls")" \
+    "only the account in use should be fetched" || return 1
+  assert_eq "ok" "$(printf '%s' "$output" | jq -r '.[0].status')" \
+    "the active account should report usage" || return 1
+  assert_eq "not-polled" "$(printf '%s' "$output" | jq -r '.[1].status')" \
+    "an unpolled account with nothing cached should say so" || return 1
+
+  # A later restricted read serves the inactive account from cache rather than
+  # forgetting what it already knew.
+  CLAUDE_BILLING_TEST_NOW=1786708800
+  output=$(_cb_usage_json "" "personal")
+  assert_eq "2" "$(cat "$HOME/calls")" \
+    "switching the polled account should cost exactly one more request" || return 1
+  assert_eq "ok" "$(printf '%s' "$output" | jq -r '.[0].status')" \
+    "the previously fetched account should be served from cache" || return 1
+  assert_eq "ok" "$(printf '%s' "$output" | jq -r '.[1].status')" \
+    "the newly polled account should report usage"
+)
+
 usage_names_a_rate_limit_rather_than_a_bare_status_code() (
   HOME="$TEST_ROOT/usage-429"
   export HOME
@@ -1218,6 +1263,8 @@ run_test "usage reports limits for each account" \
   usage_reports_limits_for_each_account
 run_test "usage reports the prepaid credit balance" \
   usage_reports_the_prepaid_credit_balance
+run_test "usage polls only the account in use" \
+  usage_polls_only_the_account_in_use
 run_test "usage names a rate limit rather than a bare status code" \
   usage_names_a_rate_limit_rather_than_a_bare_status_code
 run_test "usage survives a credits endpoint failure" \

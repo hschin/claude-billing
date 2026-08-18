@@ -417,3 +417,13 @@ final class UsageRefreshFailureTests: XCTestCase {
         XCTAssertNotNil(broken.problem)
     }
 }
+
+final class UsageNotPolledTests: XCTestCase {
+    func testAnUnpolledAccountReadsAsAChoiceNotAFault() throws {
+        let json = #"{"account": "personal", "status": "not-polled"}"#
+        let account = try JSONDecoder().decode(UsageAccount.self, from: Data(json.utf8))
+
+        XCTAssertEqual(account.problem, "not checked — only the account in use is polled")
+        XCTAssertFalse(account.isOK)
+    }
+}
