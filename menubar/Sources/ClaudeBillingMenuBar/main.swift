@@ -363,17 +363,18 @@ struct UsageAccount: Decodable, Equatable {
         return staleReason
     }
 
-    var ageNote: String? {
-        guard let ageSeconds, ageSeconds > 60 else { return nil }
-        let minutes = ageSeconds / 60
-        let base = minutes < 60 ? "cached \(minutes) min ago" : "cached \(minutes / 60)h ago"
-        return staleReason.map { "\(base) — \($0)" } ?? base
+    /// Why the figures weren't refreshed. How OLD they are now lives beside the
+    /// account name, where it qualifies everything under it at a glance; the
+    /// reason is a separate fact and only appears when there is one.
+    var staleNote: String? {
+        guard let staleReason, !staleReason.isEmpty else { return nil }
+        return "not refreshed — \(staleReason)"
     }
 }
 
-/// How long ago the figures on screen were read. The submenu's `ageNote` only
-/// speaks up when data is stale; this always says something, because "when was
-/// this measured" is part of reading a percentage at all.
+/// How long ago the figures on screen were read. Always says something, because
+/// "when was this measured" is part of reading a percentage at all — it sits
+/// beside the account name in the submenu and after the headline in the row.
 func usageFreshnessNote(ageSeconds: Int) -> String {
     let age = max(ageSeconds, 0)
     if age < 60 { return "updated just now" }
@@ -952,9 +953,23 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         menu.addItem(quitItem)
     }
 
-    private func sectionItem(title: String) -> NSMenuItem {
+    /// `detail` rides along in secondary text — used for an account's freshness,
+    /// which qualifies every figure beneath it and so belongs at the top of the
+    /// group rather than buried under it.
+    private func sectionItem(title: String, detail: String? = nil) -> NSMenuItem {
         let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
         item.isEnabled = false
+        guard let detail else { return item }
+        item.title = "\(title) \u{b7} \(detail)"
+        let attributed = NSMutableAttributedString(string: title, attributes: [
+            .font: NSFont.menuFont(ofSize: 0),
+            .foregroundColor: NSColor.labelColor,
+        ])
+        attributed.append(NSAttributedString(string: " \u{b7} " + detail, attributes: [
+            .font: NSFont.menuFont(ofSize: NSFont.smallSystemFontSize),
+            .foregroundColor: NSColor.secondaryLabelColor,
+        ]))
+        item.attributedTitle = attributed
         return item
     }
 
@@ -1148,7 +1163,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         let submenu = NSMenu()
         for (index, account) in usage.enumerated() {
             if index > 0 { submenu.addItem(.separator()) }
-            submenu.addItem(sectionItem(title: account.displayName))
+            // Freshness qualifies everything in this group, so it leads.
+            submenu.addItem(sectionItem(
+                title: account.displayName,
+                detail: account.isOK ? usageFreshnessNote(ageSeconds: usageAgeSeconds(for: account)) : nil
+            ))
             if let problem = account.problem {
                 submenu.addItem(detailItem(title: problem))
                 continue
@@ -1181,8 +1200,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                     title: "Access token expired — switch to this account to refresh it"
                 ))
             }
-            if let ageNote = account.ageNote {
-                submenu.addItem(detailItem(title: ageNote))
+            if let staleNote = account.staleNote {
+                submenu.addItem(detailItem(title: staleNote))
             }
         }
         // No refresh action or source note here: the menu's own Refresh forces a

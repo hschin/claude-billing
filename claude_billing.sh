@@ -1137,10 +1137,18 @@ _cb_usage_lines() {
       elif . == "weekly_opus" then "Weekly (Opus)"
       elif . == "weekly_sonnet" then "Weekly (Sonnet)"
       else (gsub("_"; " ")) end;
+    # How old the figures are qualifies every line beneath them, so it sits with
+    # the account name rather than trailing the group.
+    def freshness:
+      (.ageSeconds // 0) as $age
+      | if $age < 60 then "updated just now"
+        elif $age < 3600 then "updated \(($age / 60) | floor) min ago"
+        else "updated \(($age / 3600) | floor)h ago" end;
     .[] |
-    "  \(if .account == "" then "subscription" else .account end):" as $head |
+    "  \(if .account == "" then "subscription" else .account end)" as $name |
+    "\($name):" as $head |
     if .status == "ok" then
-      $head,
+      "\($name) (\(freshness)):",
       ( .limits[] | "    \(.kind | limit_name): \(.percent)%" +
         (if .resetsAt != null then " — resets \(.resetsAt | sub("\\..*$"; "") | sub("T"; " ") + " UTC")"
          # A 5-hour window has no reset time until it starts.
@@ -1160,9 +1168,7 @@ _cb_usage_lines() {
       ( if .tokenExpired == true then
           "    ! access token expired — switch to this account to refresh it"
         else empty end ),
-      ( if (.ageSeconds // 0) > 60 then
-          "    (cached \((.ageSeconds / 60) | floor) min ago\(if .staleReason != null then ": \(.staleReason)" else "" end))"
-        else empty end )
+      ( if .staleReason != null then "    (not refreshed: \(.staleReason))" else empty end )
     elif .status == "token-expired" then
       "\($head) access token expired — switch to this account to refresh it"
     elif .status == "no-token" then

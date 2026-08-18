@@ -332,12 +332,12 @@ final class BillingStateTests: XCTestCase {
             )
         }
 
-        XCTAssertNil(account(age: nil).ageNote)
-        XCTAssertNil(account(age: 30).ageNote)
-        XCTAssertEqual(account(age: 600).ageNote, "cached 10 min ago")
+        // Age lives beside the account name now; this note is only the reason.
+        XCTAssertNil(account(age: nil).staleNote)
+        XCTAssertNil(account(age: 600).staleNote)
         XCTAssertEqual(
-            account(age: 7_200, reason: "api.anthropic.com returned HTTP 500").ageNote,
-            "cached 2h ago — api.anthropic.com returned HTTP 500"
+            account(age: 7_200, reason: "api.anthropic.com returned HTTP 500").staleNote,
+            "not refreshed — api.anthropic.com returned HTTP 500"
         )
     }
 
