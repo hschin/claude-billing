@@ -26,6 +26,14 @@ assert_eq() {
   fi
 }
 
+# GNU stat spells it -c, BSD/macOS -f. Order matters: on Linux `stat -f` is
+# valid (it reports the FILESYSTEM) and succeeds, so trying it first silently
+# returns filesystem stats instead of a mode, which is how this passed locally
+# and failed in CI.
+file_mode() {
+  stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null
+}
+
 run_test() {
   name=$1
   shift
@@ -591,9 +599,11 @@ usage_reports_limits_for_each_account() (
   # account no request was spent on.
   assert_eq "true" "$(printf '%s' "$output" | jq -r '.[1].tokenExpired')" \
     "an expired token should be flagged for the menu to grey out" || return 1
-  assert_eq "600" "$(wc -c < "$HOME/.claude-billing/usage-cache.json" | tr -d ' ' | sed 's/^[0-9]*$/600/')" \
+  # This assertion used to launder any file size into "600" through sed, so it
+  # could not fail; check that the cache actually holds the account instead.
+  assert_eq "ok" "$(jq -r '.work.status' "$HOME/.claude-billing/usage-cache.json")" \
     "usage results should be cached" || return 1
-  assert_eq "600" "$(stat -f '%Lp' "$HOME/.claude-billing/usage-cache.json" 2>/dev/null || stat -c '%a' "$HOME/.claude-billing/usage-cache.json")" \
+  assert_eq "600" "$(file_mode "$HOME/.claude-billing/usage-cache.json")" \
     "the usage cache must not be world-readable"
 )
 
