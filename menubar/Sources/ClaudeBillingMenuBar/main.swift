@@ -303,6 +303,18 @@ struct UsageAccount: Decodable, Equatable {
     }
 }
 
+/// How long ago the figures on screen were read. The submenu's `ageNote` only
+/// speaks up when data is stale; this always says something, because "when was
+/// this measured" is part of reading a percentage at all.
+func usageFreshnessNote(ageSeconds: Int) -> String {
+    let age = max(ageSeconds, 0)
+    if age < 60 { return "updated just now" }
+    let minutes = age / 60
+    if minutes < 60 { return "updated \(minutes) min ago" }
+    let hours = minutes / 60
+    return "updated \(hours)h ago"
+}
+
 struct BillingState: Decodable, Equatable {
     let mode: String
     let kind: String
@@ -664,27 +676,38 @@ private extension CommandResult {
     }
 }
 
-private final class AppDelegate: NSObject, NSApplicationDelegate {
+private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let client = BillingClient()
     private var statusItem: NSStatusItem!
+    private let menu = NSMenu()
     private var currentState: BillingState?
     private var usage: [UsageAccount] = []
     private var isSwitching = false
     private var isLoadingUsage = false
     private var refreshTimer: Timer?
     private var usageTimer: Timer?
-    /// Matches the default `CLAUDE_BILLING_USAGE_TTL` so a tick never re-fetches
-    /// data the CLI would still consider fresh.
-    private let usageRefreshInterval: TimeInterval = 300
+    /// One cadence for everything the menu shows. It matches the default
+    /// `CLAUDE_BILLING_USAGE_TTL`, so a usage tick never re-fetches data the CLI
+    /// would still consider fresh. Opening the menu refreshes state anyway
+    /// (`menuWillOpen`), so a slow background beat never shows a stale mode.
+    private let refreshInterval: TimeInterval = 300
+    /// When this app last read usage successfully, so the row can say how old
+    /// the figures are even when the CLI served them from a fresh cache.
+    private var lastUsageFetch: Date?
+    /// The error currently on the menu, so a repeated failure doesn't relay out
+    /// an open menu to say the same thing again.
+    private var lastErrorMessage: String?
     private var progressIndicator: NSProgressIndicator?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         setStatusIcon(letter: "?", description: "Claude Billing — Loading")
+        menu.delegate = self
+        statusItem.menu = menu
         rebuildMenu()
         refreshState(showError: false)
-        refreshTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
+        refreshTimer = Timer.scheduledTimer(withTimeInterval: refreshInterval, repeats: true) { [weak self] _ in
             self?.refreshState(showError: false)
         }
         // Usage can involve a network call, so it runs on its own slower timer
@@ -692,7 +715,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         // forces a fetch: the interval already matches the CLI's cache TTL, and
         // a cached read here would stall the meters for a whole extra interval.
         refreshUsage(force: false)
-        usageTimer = Timer.scheduledTimer(withTimeInterval: usageRefreshInterval, repeats: true) { [weak self] _ in
+        usageTimer = Timer.scheduledTimer(withTimeInterval: refreshInterval, repeats: true) { [weak self] _ in
             self?.refreshUsage(force: true)
         }
     }
@@ -712,10 +735,22 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
                 // A usage failure is not worth an alert; the row says so itself.
                 if case let .success(usage) = result {
                     self.usage = usage
+                    self.lastUsageFetch = Date()
                     self.rebuildMenu()
                 }
             }
         }
+    }
+
+    /// The background beat is slow on purpose; opening the menu is the moment
+    /// accuracy matters, so refresh state then. Usage is deliberately not
+    /// fetched here — it is a network call, and the row says how old it is.
+    func menuWillOpen(_ menu: NSMenu) {
+        guard !isSwitching else { return }
+        // Rebuild first, synchronously: it costs nothing and re-times the
+        // "updated N min ago" note against the clock right now.
+        rebuildMenu()
+        refreshState(showError: false)
     }
 
     private func refreshState(showError: Bool) {
@@ -725,15 +760,20 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard let self else { return }
                 switch result {
                 case let .success(state):
+                    let changed = state != self.currentState || self.lastErrorMessage != nil
                     self.currentState = state
+                    self.lastErrorMessage = nil
                     self.setStatusIcon(
                         letter: state.statusIconLetter,
                         description: "Claude Code CLI — \(state.displayName)"
                     )
-                    self.rebuildMenu()
+                    if changed { self.rebuildMenu() }
                 case let .failure(error):
+                    let message = error.localizedDescription
+                    let changed = self.lastErrorMessage != message
+                    self.lastErrorMessage = message
                     self.setStatusIcon(letter: "!", description: "Claude Billing — Error")
-                    self.rebuildMenu(errorMessage: error.localizedDescription)
+                    if changed { self.rebuildMenu(errorMessage: message) }
                     if showError { self.showError(error) }
                 }
             }
@@ -741,7 +781,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func rebuildMenu(errorMessage: String? = nil) {
-        let menu = NSMenu()
+        // Repopulate the one menu object rather than swapping in a new one:
+        // replacing `statusItem.menu` while the menu is on screen dismisses it,
+        // and both `menuWillOpen` and the background timers rebuild.
+        menu.removeAllItems()
 
         if let errorMessage {
             let errorItem = NSMenuItem(title: "Unable to load billing state", action: nil, keyEquivalent: "")
@@ -822,7 +865,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         quitItem.image = menuImage(named: "power", description: "Quit")
         quitItem.target = self
         menu.addItem(quitItem)
-        statusItem.menu = menu
     }
 
     private func sectionItem(title: String) -> NSMenuItem {
@@ -913,6 +955,16 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         return item
     }
 
+    /// The CLI reports how old its cached figures are; that reads 0 right after
+    /// a forced fetch, so pair it with when this app last read them and show
+    /// whichever is older. A failed refresh keeps the stale CLI age, which is
+    /// the honest number.
+    private func usageAgeSeconds(for account: UsageAccount) -> Int {
+        let cached = account.ageSeconds ?? 0
+        let sinceFetch = lastUsageFetch.map { Int(Date().timeIntervalSince($0)) } ?? 0
+        return max(cached, sinceFetch)
+    }
+
     /// Plan usage for the subscription accounts. The row summarises the active
     /// account (the plan being spent right now) and the submenu breaks every
     /// account down. Figures come from an unofficial endpoint, so the submenu
@@ -940,6 +992,13 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
                 percent: headline.percent,
                 color: headline.level.color
             ))
+            // Secondary weight: when it was measured qualifies the number, it
+            // isn't part of it.
+            let freshness = usageFreshnessNote(ageSeconds: usageAgeSeconds(for: active))
+            attributed.append(NSAttributedString(string: "  \u{b7} " + freshness, attributes: [
+                .font: NSFont.menuFont(ofSize: NSFont.smallSystemFontSize),
+                .foregroundColor: NSColor.secondaryLabelColor,
+            ]))
             item.attributedTitle = attributed
             item.toolTip = "\(active.displayName): \(headline.detailLabel) · \(headline.percent)% used"
             item.setAccessibilityLabel("Plan usage: \(headline.detailLabel), \(headline.percent) percent used")

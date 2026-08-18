@@ -366,3 +366,21 @@ final class BillingStateTests: XCTestCase {
         XCTAssertTrue(script.contains("source \"$HOME/.claude-billing/claude_billing.sh\""))
     }
 }
+
+final class UsageFreshnessTests: XCTestCase {
+    func testUnderAMinuteReadsAsJustNow() {
+        XCTAssertEqual(usageFreshnessNote(ageSeconds: 0), "updated just now")
+        XCTAssertEqual(usageFreshnessNote(ageSeconds: 59), "updated just now")
+    }
+
+    func testMinutesAndHours() {
+        XCTAssertEqual(usageFreshnessNote(ageSeconds: 60), "updated 1 min ago")
+        XCTAssertEqual(usageFreshnessNote(ageSeconds: 300), "updated 5 min ago")
+        XCTAssertEqual(usageFreshnessNote(ageSeconds: 3599), "updated 59 min ago")
+        XCTAssertEqual(usageFreshnessNote(ageSeconds: 7200), "updated 2h ago")
+    }
+
+    func testNegativeAgeClampsRatherThanReadingAsFuture() {
+        XCTAssertEqual(usageFreshnessNote(ageSeconds: -30), "updated just now")
+    }
+}
