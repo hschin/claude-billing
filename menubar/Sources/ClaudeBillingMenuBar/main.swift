@@ -1013,10 +1013,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         ])
         attributed.append(NSAttributedString(string: label, attributes: [
             .font: NSFont.menuFont(ofSize: NSFont.smallSystemFontSize),
-            .foregroundColor: isStale ? NSColor.tertiaryLabelColor : NSColor.secondaryLabelColor,
+            // Full-strength label text for live figures: dimming is what marks a
+            // figure as no longer true, so it has to mean only that.
+            .foregroundColor: isStale ? NSColor.tertiaryLabelColor : NSColor.labelColor,
         ]))
         item.attributedTitle = attributed
-        item.toolTip = isStale ? "\(label) — last known figure, not current" : label
         item.setAccessibilityLabel(isStale
             ? "\(label): unknown, access token expired"
             : "\(label): \(shown) percent used")
@@ -1106,7 +1107,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         let active = usage.first { $0.account == (activeAccount ?? "") } ?? usage.first
         let item = NSMenuItem(title: "Plan usage", action: nil, keyEquivalent: "")
         item.image = menuImage(named: "chart.bar", description: "Plan usage")
-        item.toolTip = "Subscription plan usage for the active Claude Code CLI account."
 
         // The bar carries the headline number; which limit it is, and when it
         // clears, belong on hover rather than in the row.
@@ -1146,18 +1146,14 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                 ))
             }
             item.attributedTitle = attributed
-            var tooltip = "\(active.displayName): \(headline.detailLabel) · \(headline.percent)% used"
-            if let failure = active.refreshFailure {
-                tooltip += "\nLast refresh failed: \(failure). The figures shown are the last good ones."
-            }
-            item.toolTip = tooltip
             item.setAccessibilityLabel(active.refreshFailure.map {
                 "Plan usage: \(headline.detailLabel), \(headline.percent) percent used. Refresh failed: \($0)"
             } ?? "Plan usage: \(headline.detailLabel), \(headline.percent) percent used")
         } else if let active, let problem = active.problem {
-            item.title = "Plan usage · \(problem.split(separator: "—").first?.trimmingCharacters(in: .whitespaces) ?? problem)"
+            // The whole problem, not its first clause: with no hover text, the
+            // row is the only place it can be read.
+            item.title = "Plan usage · \(problem)"
             item.image = menuImage(named: "exclamationmark.triangle.fill", description: "Plan usage unavailable")
-            item.toolTip = "\(active.displayName): \(problem)"
         }
 
         let submenu = NSMenu()
