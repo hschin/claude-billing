@@ -673,6 +673,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     private var isLoadingUsage = false
     private var refreshTimer: Timer?
     private var usageTimer: Timer?
+    /// Matches the default `CLAUDE_BILLING_USAGE_TTL` so a tick never re-fetches
+    /// data the CLI would still consider fresh.
+    private let usageRefreshInterval: TimeInterval = 300
     private var progressIndicator: NSProgressIndicator?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -685,10 +688,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.refreshState(showError: false)
         }
         // Usage can involve a network call, so it runs on its own slower timer
-        // and never gates the billing state the menu is really about.
+        // and never gates the billing state the menu is really about. Each tick
+        // forces a fetch: the interval already matches the CLI's cache TTL, and
+        // a cached read here would stall the meters for a whole extra interval.
         refreshUsage(force: false)
-        usageTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
-            self?.refreshUsage(force: false)
+        usageTimer = Timer.scheduledTimer(withTimeInterval: usageRefreshInterval, repeats: true) { [weak self] _ in
+            self?.refreshUsage(force: true)
         }
     }
 
