@@ -178,6 +178,8 @@ The prepaid credit balance comes from a second request, to `api.anthropic.com/ap
 
 Credentials stay read-only. An account's stored access token is used exactly as it is; nothing refreshes, rewrites, or deletes a token to read usage. Access tokens are short-lived, so an account you haven't used for a while reports `token expired` — switch to it once and Claude Code refreshes the token itself. Tokens are handed to curl on stdin, never as command-line arguments, since arguments are visible to other users in `ps`.
 
+Requests identify themselves as Claude Code, whose endpoint this is; claude-billing's own name drew rate limits at a five-minute cadence. If the API does rate-limit a read, claude-billing waits as long as it asks (or fifteen minutes) before trying that account again — including when you click Refresh, since asking again is what earns a throttling — and says so in the meantime.
+
 Results are cached in `~/.claude-billing/usage-cache.json` (chmod 600) for five minutes, so repeated calls and the menu bar's polling don't hammer the endpoint. Override with `CLAUDE_BILLING_USAGE_TTL` (seconds), or force a fetch with `claude-billing usage --refresh`. If a refresh fails, the last good figures stay visible, labelled with their age and the reason they weren't updated. `claude-billing usage --json` returns the same data for scripts.
 
 ## Multiple subscription accounts

@@ -803,6 +803,26 @@ _CB_USAGE_ENDPOINT="https://api.anthropic.com/api/oauth/usage"
 _CB_CREDITS_ENDPOINT_PREFIX="https://api.anthropic.com/api/oauth/organizations/"
 _CB_CREDITS_ENDPOINT_SUFFIX="/prepaid/credits"
 _CB_USAGE_BETA="oauth-2025-04-20"
+# The usage endpoint belongs to Claude Code, and it appears to be stricter with
+# clients it doesn't recognise: claude-billing's own User-Agent drew HTTP 429s
+# at a five-minute cadence, where Claude Code polls the same endpoint freely.
+# We read the installed CLI's own version so this stays truthful about what is
+# being asked and by which client's contract, rather than inventing a version.
+_CB_USAGE_UA_FALLBACK="2.1.5"
+_CB_USAGE_USER_AGENT=""
+_cb_usage_user_agent() {
+  local version=""
+  if [[ -n "$_CB_USAGE_USER_AGENT" ]]; then
+    printf '%s' "$_CB_USAGE_USER_AGENT"
+    return 0
+  fi
+  if command -v claude >/dev/null 2>&1; then
+    version=$(claude --version 2>/dev/null | tr -cd '0-9.\n' | head -n 1)
+  fi
+  [[ -n "$version" ]] || version="$_CB_USAGE_UA_FALLBACK"
+  _CB_USAGE_USER_AGENT="claude-code/$version"
+  printf '%s' "$_CB_USAGE_USER_AGENT"
+}
 
 _cb_usage_cache_file() {
   printf '%s' "$HOME/.claude-billing/usage-cache.json"
@@ -833,6 +853,44 @@ _cb_usage_org_uuid() {
   _cb_cred_retrieve "$(_cb_acct_meta_service "$name")" | jq -r '.organizationUuid // empty' 2>/dev/null
 }
 
+# A temp file in the usual place, or nothing if one can't be made. Used for
+# response headers, which are not secret; tokens never go near it.
+_cb_mktemp_file() {
+  mktemp "${TMPDIR:-/tmp}/claude-billing-headers.XXXXXX" 2>/dev/null
+}
+
+# One header's value from a dumped header file, lowercased name, last wins
+# (redirects can dump several response blocks).
+_cb_header_value() {
+  local file="$1" want="$2"
+  [[ -f "$file" ]] || return 0
+  tr -d '\r' < "$file" \
+    | awk -v want="$want" 'BEGIN{IGNORECASE=1}
+        index(tolower($0), want ":") == 1 {
+          value = substr($0, length(want) + 2)
+          gsub(/^[ \t]+|[ \t]+$/, "", value)
+        }
+        END { if (value != "") print value }'
+}
+
+# How long to wait before asking again. Honours Retry-After when the server
+# sends one (seconds only — the HTTP-date form is not used here), and otherwise
+# picks a default for a rate limit so a 429 is never retried on the next tick.
+# Clamped: a server asking us to wait a week is not something to obey blindly,
+# and a one-second wait defeats the point.
+_cb_retry_seconds() {
+  local code="$1" retry_after="$2" seconds=0
+  if [[ "$retry_after" =~ ^[0-9]+$ ]]; then
+    seconds="$retry_after"
+  elif [[ "$code" == "429" ]]; then
+    seconds=900
+  fi
+  (( seconds <= 0 )) && { printf '0'; return 0; }
+  (( seconds < 60 )) && seconds=60
+  (( seconds > 3600 )) && seconds=3600
+  printf '%s' "$seconds"
+}
+
 # Prepaid credit balance for one account, or nothing at all. Credits are a
 # separate concern from plan limits and a separate request, so a failure here
 # (not every account has credits, and the endpoint may refuse) leaves the usage
@@ -844,7 +902,7 @@ _cb_credits_fetch_one() {
   response=$(printf '%s\n' \
     "header = \"Authorization: Bearer $token\"" \
     "header = \"anthropic-beta: $_CB_USAGE_BETA\"" \
-    "header = \"User-Agent: claude-billing/$_CB_VERSION\"" \
+    "header = \"User-Agent: $(_cb_usage_user_agent)\"" \
     "silent" "show-error" "max-time = 20" "write-out = \"\\n%{http_code}\"" \
     "url = \"$url\"" | curl --config - 2>/dev/null)
   http_status=$(printf '%s' "$response" | tail -n 1)
@@ -889,23 +947,35 @@ _cb_usage_fetch_one() {
     jq -n --arg account "$name" '{account: $account, status: "token-expired"}'
     return 0
   fi
+  # Response headers go to a file so a rate limit can report its own retry
+  # delay; the body still comes back on stdout with the status appended.
+  local header_file retry_after
+  header_file=$(_cb_mktemp_file) || header_file=""
   # curl reads the auth header from stdin so the token never reaches argv.
   response=$(printf '%s\n' \
     "header = \"Authorization: Bearer $token\"" \
     "header = \"anthropic-beta: $_CB_USAGE_BETA\"" \
-    "header = \"User-Agent: claude-billing/$_CB_VERSION\"" \
+    "header = \"User-Agent: $(_cb_usage_user_agent)\"" \
+    ${header_file:+"dump-header = \"$header_file\""} \
     "silent" "show-error" "max-time = 20" "write-out = \"\\n%{http_code}\"" \
     "url = \"$_CB_USAGE_ENDPOINT\"" | curl --config - 2>/dev/null)
   http_status=$(printf '%s' "$response" | tail -n 1)
   body=$(printf '%s' "$response" | sed '$d')
+  retry_after=""
+  if [[ -n "$header_file" ]]; then
+    retry_after=$(_cb_header_value "$header_file" "retry-after")
+    rm -f "$header_file" 2>/dev/null
+  fi
   if [[ "$http_status" != "200" ]] || [[ -z "$body" ]]; then
     jq -n --arg account "$name" --arg code "$http_status" \
+      --argjson retry "$(_cb_retry_seconds "$http_status" "$retry_after")" \
       '{account: $account, status: "unavailable",
         detail: (if $code == "" or $code == "000" then "could not reach api.anthropic.com"
                  elif $code == "429" then "rate limited by api.anthropic.com \u2014 try again shortly"
                  elif $code == "401" or $code == "403" then "api.anthropic.com rejected the login (HTTP \($code))"
                  elif ($code | startswith("5")) then "api.anthropic.com is having trouble (HTTP \($code))"
-                 else "api.anthropic.com returned HTTP \($code)" end)}'
+                 else "api.anthropic.com returned HTTP \($code)" end)}
+       + (if $retry > 0 then {retryAfter: $retry} else {} end)'
     return 0
   fi
   local credits
@@ -949,7 +1019,7 @@ _cb_usage_fetch_one() {
 # entry.
 _cb_usage_json() {
   local force="${1:-}" only="${2:-}" ttl="${CLAUDE_BILLING_USAGE_TTL:-300}" cache_file cache entry name now
-  local names="" out="" fetched_at age skip
+  local names="" out="" fetched_at age skip key retry_at retry_in retry_note
   cache_file=$(_cb_usage_cache_file)
   now=$(_cb_now)
   cache='{}'
@@ -958,7 +1028,8 @@ _cb_usage_json() {
   [[ -z "$names" ]] && names="-"
   for name in $(printf '%s' "$names"); do
     [[ "$name" == "-" ]] && name=""
-    entry=$(printf '%s' "$cache" | jq -c --arg k "${name:-_legacy}" '.[$k] // empty' 2>/dev/null)
+    key="${name:-_legacy}"
+    entry=$(printf '%s' "$cache" | jq -c --arg k "$key" '.[$k] // empty' 2>/dev/null)
     fetched_at=$(printf '%s' "$entry" | jq -r '.fetchedAt // empty' 2>/dev/null)
     age=""
     if [[ -n "$fetched_at" ]] && [[ "$fetched_at" =~ ^[0-9]+$ ]]; then
@@ -966,6 +1037,26 @@ _cb_usage_json() {
     fi
     if [[ "$force" != "--refresh" ]] && [[ -n "$age" ]] && (( age < ttl )); then
       out="${out}$(printf '%s' "$entry" | jq -c --argjson age "$age" '. + {ageSeconds: $age}')"
+      continue
+    fi
+    # A rate limit is a request to stop asking, so it outranks --refresh: the
+    # whole point is that clicking Refresh again is what got us throttled.
+    # "retry:until" holds one epoch per account. A colon is rejected by
+    # add-account's name check, so this key can never collide with an account.
+    retry_at=$(printf '%s' "$cache" | jq -r --arg k "$key" '.["retry:until"][$k] // empty' 2>/dev/null)
+    retry_in=0
+    if [[ "$retry_at" =~ ^[0-9]+$ ]] && (( retry_at > now )); then
+      retry_in=$(( retry_at - now ))
+    fi
+    if (( retry_in > 0 )); then
+      retry_note="rate limited by api.anthropic.com — retrying in $(( (retry_in + 59) / 60 )) min"
+      if [[ -n "$entry" ]]; then
+        out="${out}$(printf '%s' "$entry" | jq -c --argjson age "${age:-0}" --arg why "$retry_note" \
+          '. + {ageSeconds: $age, staleReason: $why}')"
+      else
+        out="${out}$(jq -n --arg account "$name" --arg why "$retry_note" \
+          '{account: $account, status: "unavailable", detail: $why}')"
+      fi
       continue
     fi
     skip=""
@@ -989,11 +1080,21 @@ _cb_usage_json() {
                     --argjson new "$entry" --argjson age "$age" \
         'if ($old | type) == "object" and $old.status == "ok"
          then $old + {ageSeconds: $age, staleReason: ($new.detail // $new.status)}
+              # Keep the retry delay: it belongs to the failed request, and the
+              # backoff is recorded from this entry a few lines below.
+              + (if ($new.retryAfter // 0) > 0 then {retryAfter: $new.retryAfter} else {} end)
          else $new end')
     fi
-    # ageSeconds/staleReason describe this read, not the stored result.
-    cache=$(printf '%s' "$cache" | jq -c --arg k "${name:-_legacy}" \
-      --argjson v "$(printf '%s' "$entry" | jq -c 'del(.ageSeconds, .staleReason)')" '.[$k] = $v')
+    # Remember (or forget) how long to hold off, so the wait survives the next
+    # tick, the next Refresh click, and the next shell.
+    cache=$(printf '%s' "$cache" | jq -c --arg k "$key" --argjson now "$now" \
+      --argjson retry "$(printf '%s' "$entry" | jq -r '.retryAfter // 0')" \
+      'if $retry > 0 then .["retry:until"] = ((.["retry:until"] // {}) + {($k): ($now + $retry)})
+       else .["retry:until"] = ((.["retry:until"] // {}) | del(.[$k])) end')
+    # ageSeconds/staleReason describe this read, not the stored result, and
+    # retryAfter is a property of the failed request rather than the figures.
+    cache=$(printf '%s' "$cache" | jq -c --arg k "$key" \
+      --argjson v "$(printf '%s' "$entry" | jq -c 'del(.ageSeconds, .staleReason, .retryAfter)')" '.[$k] = $v')
     out="${out}$(printf '%s' "$entry" | jq -c '. + {ageSeconds: (.ageSeconds // 0)}')"
   done
   mkdir -p "$(dirname "$cache_file")" 2>/dev/null

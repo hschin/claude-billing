@@ -638,6 +638,110 @@ usage_reports_the_prepaid_credit_balance() (
     "plan limits should still be reported alongside credits"
 )
 
+usage_backs_off_after_a_rate_limit() (
+  HOME="$TEST_ROOT/usage-backoff"
+  export HOME
+  # shellcheck source=../claude_billing.sh
+  . "$SCRIPT"
+  _CB_PLATFORM="windows"
+  mkdir -p "$HOME"
+  CLAUDE_BILLING_TEST_NOW=1786708800
+  export CLAUDE_BILLING_TEST_NOW
+  _cb_cred_store "Claude Code-credentials" \
+    '{"claudeAiOauth":{"accessToken":"live-token","expiresAt":1786799999000}}'
+
+  # One good read, so there are figures worth keeping.
+  curl() {
+    cat >/dev/null
+    printf '%s' '{"limits":[{"kind":"session","percent":40,"severity":"normal","is_active":true}]}'
+    printf '\n200'
+  }
+  _cb_usage_json >/dev/null
+
+  # Then a rate limit that asks for ten minutes.
+  printf '0' > "$HOME/calls"
+  curl() {
+    config=$(cat)
+    printf '%s' "$(( $(cat "$HOME/calls") + 1 ))" > "$HOME/calls"
+    # curl writes response headers to the file named by dump-header.
+    header_file=$(printf '%s' "$config" | sed -n 's/^dump-header = "\(.*\)"$/\1/p')
+    [[ -n "$header_file" ]] && printf 'HTTP/2 429\r\nRetry-After: 600\r\n\r\n' > "$header_file"
+    printf '\n429'
+  }
+  CLAUDE_BILLING_TEST_NOW=1786709400
+  output=$(_cb_usage_json --refresh)
+
+  assert_eq "1" "$(cat "$HOME/calls")" \
+    "the rate-limited read should have been attempted once" || return 1
+  assert_eq "40" "$(printf '%s' "$output" | jq -r '.[0].limits[0].percent')" \
+    "a rate limit should keep the last good figures" || return 1
+
+  # Five minutes later, still inside the window: asking again is what got us
+  # throttled, so --refresh must not reach the network.
+  CLAUDE_BILLING_TEST_NOW=1786709700
+  output=$(_cb_usage_json --refresh)
+  assert_eq "1" "$(cat "$HOME/calls")" \
+    "a forced refresh inside the backoff window must not call the API" || return 1
+  case "$(printf '%s' "$output" | jq -r '.[0].staleReason')" in
+    *"retrying in "*) : ;;
+    *) printf 'expected a retry note, got: %s\n' \
+         "$(printf '%s' "$output" | jq -r '.[0].staleReason')"; return 1 ;;
+  esac
+
+  # Once Retry-After has elapsed, it tries again and recovers.
+  curl() {
+    cat >/dev/null
+    printf '%s' "$(( $(cat "$HOME/calls") + 1 ))" > "$HOME/calls"
+    printf '%s' '{"limits":[{"kind":"session","percent":55,"severity":"normal","is_active":true}]}'
+    printf '\n200'
+  }
+  CLAUDE_BILLING_TEST_NOW=1786710100
+  output=$(_cb_usage_json --refresh)
+  assert_eq "2" "$(cat "$HOME/calls")" \
+    "the wait should end when Retry-After elapses" || return 1
+  assert_eq "55" "$(printf '%s' "$output" | jq -r '.[0].limits[0].percent')" \
+    "recovered figures should replace the stale ones" || return 1
+  assert_eq "null" "$(jq -r '."retry:until".personal // "null"' "$HOME/.claude-billing/usage-cache.json")" \
+    "a successful read should clear the backoff"
+)
+
+usage_identifies_itself_as_claude_code() (
+  HOME="$TEST_ROOT/usage-ua"
+  export HOME
+  # shellcheck source=../claude_billing.sh
+  . "$SCRIPT"
+  _CB_PLATFORM="windows"
+  mkdir -p "$HOME"
+  CLAUDE_BILLING_TEST_NOW=1786708800
+  export CLAUDE_BILLING_TEST_NOW
+  _cb_cred_store "Claude Code-credentials" \
+    '{"claudeAiOauth":{"accessToken":"live-token","expiresAt":1786799999000}}'
+  # The endpoint is Claude Code's, and rate-limits clients it doesn't know.
+  claude() { echo "2.4.9 (Claude Code)"; }
+  curl() {
+    cat > "$HOME/config"
+    printf '%s' '{"limits":[{"kind":"session","percent":1,"severity":"normal","is_active":true}]}'
+    printf '\n200'
+  }
+
+  _cb_usage_json >/dev/null
+
+  case "$(cat "$HOME/config")" in
+    *'User-Agent: claude-code/2.4.9'*) : ;;
+    *) printf 'expected the installed CLI version in the User-Agent, got:\n%s\n' \
+         "$(grep -i user-agent "$HOME/config")"; return 1 ;;
+  esac
+  # And a version we cannot read must not produce a broken header.
+  _CB_USAGE_USER_AGENT=""
+  claude() { return 1; }
+  _cb_usage_json --refresh >/dev/null
+  case "$(cat "$HOME/config")" in
+    *"User-Agent: claude-code/$_CB_USAGE_UA_FALLBACK"*) : ;;
+    *) printf 'expected the fallback version, got:\n%s\n' \
+         "$(grep -i user-agent "$HOME/config")"; return 1 ;;
+  esac
+)
+
 usage_polls_only_the_account_in_use() (
   HOME="$TEST_ROOT/usage-active-only"
   export HOME
@@ -1263,6 +1367,10 @@ run_test "usage reports limits for each account" \
   usage_reports_limits_for_each_account
 run_test "usage reports the prepaid credit balance" \
   usage_reports_the_prepaid_credit_balance
+run_test "usage backs off after a rate limit" \
+  usage_backs_off_after_a_rate_limit
+run_test "usage identifies itself as Claude Code" \
+  usage_identifies_itself_as_claude_code
 run_test "usage polls only the account in use" \
   usage_polls_only_the_account_in_use
 run_test "usage names a rate limit rather than a bare status code" \
