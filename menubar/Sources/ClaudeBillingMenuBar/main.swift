@@ -1001,7 +1001,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         let shown = min(max(percent, 0), 100)
         let percentText = isStale ? "  —  " : String(format: "%3d%%  ", shown)
         let item = NSMenuItem(title: percentText + label, action: nil, keyEquivalent: "")
-        item.isEnabled = false
+        // AppKit greys the text of a DISABLED item no matter what colour the
+        // attributed title asks for, so a live figure has to be enabled to read
+        // as live — it has no action, so there is nothing to click. Leaving a
+        // stale one disabled then does the dimming for us.
+        item.isEnabled = !isStale
         item.image = usageBarImage(
             percent: percent,
             color: isStale ? .tertiaryLabelColor : level.color
@@ -1024,20 +1028,21 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         return item
     }
 
-    /// A problem worth acting on, under the figures it explains. Orange rather
-    /// than the secondary grey of a detail row: this one is asking for something.
+    /// A problem worth acting on, under the figures it explains. The glyph marks
+    /// it; the text stays in the same secondary grey as every other detail line.
+    /// Orange type reads as an emergency, and an expired token is an errand.
     private func alertItem(title: String) -> NSMenuItem {
         let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
         item.isEnabled = false
         let attributed = NSMutableAttributedString()
         attributed.append(symbolAttachment(
             named: "exclamationmark.triangle.fill",
-            color: .systemOrange,
+            color: .secondaryLabelColor,
             pointSize: NSFont.smallSystemFontSize
         ))
         attributed.append(NSAttributedString(string: " " + title, attributes: [
             .font: NSFont.menuFont(ofSize: NSFont.smallSystemFontSize),
-            .foregroundColor: NSColor.systemOrange,
+            .foregroundColor: NSColor.secondaryLabelColor,
         ]))
         item.attributedTitle = attributed
         return item
@@ -1157,6 +1162,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         }
 
         let submenu = NSMenu()
+        // Otherwise AppKit disables every actionless row and greys it, which is
+        // the whole reason live figures looked inactive.
+        submenu.autoenablesItems = false
         for (index, account) in usage.enumerated() {
             if index > 0 { submenu.addItem(.separator()) }
             // Freshness qualifies everything in this group, so it leads.
