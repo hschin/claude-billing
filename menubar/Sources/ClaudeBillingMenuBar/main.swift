@@ -87,6 +87,50 @@ enum UsageLevel {
         case .critical: return .systemRed
         }
     }
+
+    /// How many of the three bars in the row's icon are lit. Colour and count
+    /// carry the same information deliberately: the count survives being seen
+    /// by someone who can't tell the three colours apart.
+    var litBars: Int {
+        switch self {
+        case .ok: return 1
+        case .warning: return 2
+        case .critical: return 3
+        }
+    }
+}
+
+/// The three-bar chart icon on the `Plan usage` row, lit to match the level: one
+/// green bar, two orange, three red. This replaces a separate progress bar in
+/// that row - the icon column was already spending its width saying "usage", so
+/// it may as well say how much.
+func usageLevelIcon(level: UsageLevel, size: NSSize = NSSize(width: 15, height: 13)) -> NSImage {
+    let image = NSImage(size: size, flipped: false) { rect in
+        let barWidth: CGFloat = 3
+        let gap: CGFloat = (rect.width - barWidth * 3) / 2
+        let heights: [CGFloat] = [rect.height * 0.45, rect.height * 0.72, rect.height]
+        for index in 0..<3 {
+            let barRect = NSRect(
+                x: rect.minX + CGFloat(index) * (barWidth + gap),
+                y: rect.minY,
+                width: barWidth,
+                height: heights[index]
+            )
+            let path = NSBezierPath(roundedRect: barRect, xRadius: 1, yRadius: 1)
+            // Unlit bars stay visible so the icon still reads as a chart, and so
+            // the lit count is a count rather than a lone floating bar.
+            if index < level.litBars {
+                level.color.setFill()
+            } else {
+                NSColor.tertiaryLabelColor.setFill()
+            }
+            path.fill()
+        }
+        return true
+    }
+    // Not a template image: templates get recoloured to match the menu.
+    image.isTemplate = false
+    return image
 }
 
 /// Width of the filled part of a usage bar. Split out from the drawing so the
@@ -130,21 +174,6 @@ func usageBarImage(
     image.isTemplate = false
     image.accessibilityDescription = "\(min(max(percent, 0), 100)) percent used"
     return image
-}
-
-/// The bar as an inline run of text, for placing it *after* a title. A menu
-/// item's image always precedes its title and occupies the shared icon column,
-/// so a wide bar there would indent that row's text past every other row.
-func usageBarAttachment(
-    percent: Int,
-    color: NSColor,
-    size: NSSize = NSSize(width: 46, height: 8)
-) -> NSAttributedString {
-    let attachment = NSTextAttachment()
-    attachment.image = usageBarImage(percent: percent, color: color, size: size)
-    // Nudged down so the bar sits on the text's optical centre, not its baseline.
-    attachment.bounds = CGRect(x: 0, y: -1, width: size.width, height: size.height)
-    return NSAttributedString(attachment: attachment)
 }
 
 /// One plan limit as reported by Claude's OAuth usage endpoint.
@@ -980,7 +1009,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         if let active, let headline = active.headline, active.isOK {
             // The reset time earns its place in the row: it says how long you'd
             // have to wait, which the bar alone can't.
-            let text = "Plan usage · \(headline.percent)%\(headline.statusSuffix)  "
+            let text = "Plan usage · \(headline.percent)%\(headline.statusSuffix)"
             item.title = text
             // Keep the shared icon column, and trail the bar after the text so
             // this row's label lines up with every other row's.
@@ -988,14 +1017,14 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                 .font: NSFont.menuFont(ofSize: 0),
                 .foregroundColor: NSColor.labelColor,
             ])
-            attributed.append(usageBarAttachment(
-                percent: headline.percent,
-                color: headline.level.color
-            ))
+            // The icon column carries the level: one green bar, two orange,
+            // three red. No separate progress bar in this row.
+            item.image = usageLevelIcon(level: headline.level)
+            item.image?.accessibilityDescription = "Plan usage \(headline.percent) percent"
             // Secondary weight: when it was measured qualifies the number, it
             // isn't part of it.
             let freshness = usageFreshnessNote(ageSeconds: usageAgeSeconds(for: active))
-            attributed.append(NSAttributedString(string: "  \u{b7} " + freshness, attributes: [
+            attributed.append(NSAttributedString(string: " \u{b7} " + freshness, attributes: [
                 .font: NSFont.menuFont(ofSize: NSFont.smallSystemFontSize),
                 .foregroundColor: NSColor.secondaryLabelColor,
             ]))

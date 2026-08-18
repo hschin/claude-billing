@@ -304,17 +304,6 @@ final class BillingStateTests: XCTestCase {
         XCTAssertEqual(spend(1, 10, "SGD").detailLabel, "Usage credits · SGD 1.00 of SGD 10.00")
     }
 
-    func testUsageBarAttachmentCarriesTheBarInline() {
-        let attachment = usageBarAttachment(percent: 42, color: .systemGreen)
-
-        // One attachment run, so it can trail a title instead of taking the
-        // icon column and indenting that row's text past the others.
-        XCTAssertEqual(attachment.length, 1)
-        let value = attachment.attribute(.attachment, at: 0, effectiveRange: nil)
-        let embedded = (value as? NSTextAttachment)?.image
-        XCTAssertEqual(embedded?.size, NSSize(width: 46, height: 8))
-        XCTAssertEqual((value as? NSTextAttachment)?.bounds.width, 46)
-    }
 
     func testUsageLevelThresholdsMapToTrafficLightColours() {
         XCTAssertEqual(UsageLevel(percent: 0).color, NSColor.systemGreen)
@@ -382,5 +371,22 @@ final class UsageFreshnessTests: XCTestCase {
 
     func testNegativeAgeClampsRatherThanReadingAsFuture() {
         XCTAssertEqual(usageFreshnessNote(ageSeconds: -30), "updated just now")
+    }
+}
+
+final class UsageLevelIconTests: XCTestCase {
+    func testLitBarCountMatchesTheColourBands() {
+        XCTAssertEqual(UsageLevel(percent: 0).litBars, 1)
+        XCTAssertEqual(UsageLevel(percent: 59).litBars, 1)
+        XCTAssertEqual(UsageLevel(percent: 60).litBars, 2)
+        XCTAssertEqual(UsageLevel(percent: 84).litBars, 2)
+        XCTAssertEqual(UsageLevel(percent: 85).litBars, 3)
+        XCTAssertEqual(UsageLevel(percent: 100).litBars, 3)
+    }
+
+    func testIconIsNotATemplateSoItKeepsItsColour() {
+        let icon = usageLevelIcon(level: .critical)
+        XCTAssertFalse(icon.isTemplate)
+        XCTAssertEqual(icon.size, NSSize(width: 15, height: 13))
     }
 }
