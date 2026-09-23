@@ -1351,11 +1351,10 @@ menubar_uninstall_command_passes_the_uninstall_flag() (
     "menu bar uninstall command should pass the standalone uninstall flag"
 )
 
-installer_downloads_the_menubar_helper_on_macos() (
-  home="$TEST_ROOT/installer-menubar-helper"
-  bin="$home/bin"
+# Fake curl/uname/security/claude so install.sh runs offline as macOS.
+make_fake_macos_install_bin() {
+  bin=$1
   mkdir -p "$bin"
-
   {
     printf '%s\n' '#!/bin/sh'
     printf '%s\n' 'out=""'
@@ -1374,6 +1373,12 @@ installer_downloads_the_menubar_helper_on_macos() (
   printf '%s\n' '#!/bin/sh' 'exit 1' > "$bin/security"
   printf '%s\n' '#!/bin/sh' 'exit 0' > "$bin/claude"
   chmod +x "$bin/curl" "$bin/uname" "$bin/security" "$bin/claude"
+}
+
+installer_downloads_the_menubar_helper_on_macos() (
+  home="$TEST_ROOT/installer-menubar-helper"
+  bin="$home/bin"
+  make_fake_macos_install_bin "$bin"
 
   printf 'n\nn\nn\n' | HOME="$home" SHELL=/bin/bash PATH="$bin:$PATH" \
     bash "$REPO_DIR/install.sh" > "$home/install-output" 2>&1
@@ -1387,6 +1392,20 @@ installer_downloads_the_menubar_helper_on_macos() (
     printf '    menu bar helper was not installed\n' >&2
     return 1
   }
+)
+
+reinstall_keeps_the_existing_bedrock_config() (
+  home="$TEST_ROOT/installer-keeps-conf"
+  bin="$home/bin"
+  make_fake_macos_install_bin "$bin"
+  printf '%s\n' 'CLAUDE_BILLING_REGION="ap-southeast-1"' 'CLAUDE_BILLING_OPUS="my-opus"' \
+    > "$home/.claude-billing.conf"
+
+  printf 'n\nn\nn\n' | HOME="$home" SHELL=/bin/bash PATH="$bin:$PATH" \
+    bash "$REPO_DIR/install.sh" > "$home/install-output" 2>&1 || return 1
+
+  assert_eq "my-opus" "$(grep OPUS "$home/.claude-billing.conf" | cut -d'"' -f2)" \
+    "declining Bedrock setup on reinstall must not blank the saved config"
 )
 
 run_test "failed desktop restore preserves live and stashed sessions" \
@@ -1479,6 +1498,8 @@ run_test "menu bar uninstall command passes the uninstall flag" \
   menubar_uninstall_command_passes_the_uninstall_flag
 run_test "installer downloads the menu bar helper on macOS" \
   installer_downloads_the_menubar_helper_on_macos
+run_test "reinstall keeps the existing Bedrock config" \
+  reinstall_keeps_the_existing_bedrock_config
 
 if [ "$failures" -ne 0 ]; then
   printf '%s test(s) failed\n' "$failures" >&2

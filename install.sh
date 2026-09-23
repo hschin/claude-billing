@@ -146,6 +146,9 @@ _cb_read -r setup_bedrock
 
 if [[ "$setup_bedrock" =~ ^[Yy]$ ]]; then
   _claude_billing_configure
+elif [[ -f "$HOME/.claude-billing.conf" ]]; then
+  # Reinstall: keep the saved Bedrock config rather than blanking it.
+  echo "Kept existing Bedrock config in ~/.claude-billing.conf."
 else
   cat > "$HOME/.claude-billing.conf" <<EOF
 CLAUDE_BILLING_REGION=""
