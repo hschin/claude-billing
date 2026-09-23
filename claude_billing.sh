@@ -1189,6 +1189,62 @@ _claude_billing_login() {
   claude auth login --claudeai
 }
 
+# --- Bedrock config ---
+
+# Write ~/.claude-billing.conf atomically.
+# Args: conf region sonnet opus haiku fable profile_mode aws_profile
+_cb_conf_write() {
+  local conf="$1" tmp
+  tmp=$(mktemp "${conf}.XXXXXX") || return 1
+  if {
+    printf 'CLAUDE_BILLING_REGION="%s"\n' "$2"
+    printf 'CLAUDE_BILLING_SONNET="%s"\n' "$3"
+    printf 'CLAUDE_BILLING_OPUS="%s"\n' "$4"
+    printf 'CLAUDE_BILLING_HAIKU="%s"\n' "$5"
+    printf 'CLAUDE_BILLING_FABLE="%s"\n' "$6"
+    printf 'CLAUDE_BILLING_AWS_PROFILE_MODE="%s"\n' "$7"
+    printf 'CLAUDE_BILLING_AWS_PROFILE="%s"\n' "$8"
+  } > "$tmp" && mv "$tmp" "$conf"; then
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
+}
+
+# Before leaving Bedrock, copy the live Bedrock env from settings.json back
+# into the conf. The bedrock switch rebuilds these keys from the conf and the
+# api/subscription switches delete them, so edits made directly in
+# settings.json (e.g. newer model IDs) would otherwise be lost on the round
+# trip. No-op when settings.json isn't in Bedrock mode. AWS_PROFILE present
+# means explicit mode — the bedrock switch deletes it in inherit mode.
+_cb_bedrock_conf_save() {
+  local settings="$1" conf="$2" row
+  local region sonnet opus haiku fable profile_mode aws_profile
+  _cb_require_cmd jq "install with: brew install jq / apt install jq / winget install jqlang.jq" || return 1
+  row=$(jq -r '(.env // {}) as $e |
+    if ($e.CLAUDE_CODE_USE_BEDROCK // "") == "" then empty else
+      [$e.AWS_REGION, $e.ANTHROPIC_DEFAULT_SONNET_MODEL, $e.ANTHROPIC_DEFAULT_OPUS_MODEL,
+       $e.ANTHROPIC_DEFAULT_HAIKU_MODEL, $e.ANTHROPIC_DEFAULT_FABLE_MODEL, $e.AWS_PROFILE]
+      | map(. // "" | tostring) | join("\u001f")
+    end' "$settings" 2>/dev/null) || return 0
+  [[ -z "$row" ]] && return 0
+  IFS=$'\037' read -r region sonnet opus haiku fable aws_profile <<< "$row"
+  # Keep the conf's value for any required key the settings file lost, so a
+  # half-edited settings.json can't leave the conf unusable.
+  if [[ -f "$conf" ]]; then
+    [[ -z "$region" ]] && region=$(_cb_conf_get "$conf" CLAUDE_BILLING_REGION)
+    [[ -z "$sonnet" ]] && sonnet=$(_cb_conf_get "$conf" CLAUDE_BILLING_SONNET)
+    [[ -z "$opus" ]]   && opus=$(_cb_conf_get "$conf"   CLAUDE_BILLING_OPUS)
+    [[ -z "$haiku" ]]  && haiku=$(_cb_conf_get "$conf"  CLAUDE_BILLING_HAIKU)
+  fi
+  profile_mode="inherit"
+  [[ -n "$aws_profile" ]] && profile_mode="explicit"
+  if ! _cb_conf_write "$conf" "$region" "$sonnet" "$opus" "$haiku" "$fable" "$profile_mode" "$aws_profile"; then
+    echo "claude-billing: failed to save Bedrock settings to $conf — not switching, so they aren't lost" >&2
+    return 1
+  fi
+}
+
 # --- Main function ---
 
 claude_billing() {
@@ -1209,6 +1265,7 @@ claude_billing() {
         esac
         return 1
       fi
+      _cb_bedrock_conf_save "$settings" "$conf" || return 1
       # Pass key via env var — avoids exposing it in the process list via jq --arg
       ANTHROPIC_API_KEY="$key" _cb_settings_update "$settings" '
         .env |= (
@@ -1248,6 +1305,7 @@ claude_billing() {
         echo "claude-billing: no accounts registered yet — add one with: claude-billing add-account $acct"
         return 1
       fi
+      _cb_bedrock_conf_save "$settings" "$conf" || return 1
       _cb_settings_update "$settings" '
         .env |= (
           del(.CLAUDE_CODE_USE_BEDROCK) |
@@ -1937,15 +1995,7 @@ _claude_billing_configure() {
   haiku=$(_claude_billing_pick_model "Haiku" "${saved_haiku:-}" "$models")
   fable=$(_claude_billing_pick_model "Fable" "${saved_fable:-}" "$models")
 
-  cat > "$HOME/.claude-billing.conf" <<EOF
-CLAUDE_BILLING_REGION="$region"
-CLAUDE_BILLING_SONNET="$sonnet"
-CLAUDE_BILLING_OPUS="$opus"
-CLAUDE_BILLING_HAIKU="$haiku"
-CLAUDE_BILLING_FABLE="$fable"
-CLAUDE_BILLING_AWS_PROFILE_MODE="$profile_mode"
-CLAUDE_BILLING_AWS_PROFILE="$aws_profile"
-EOF
+  _cb_conf_write "$conf" "$region" "$sonnet" "$opus" "$haiku" "$fable" "$profile_mode" "$aws_profile" || return 1
 
   echo ""
   echo "Config saved to ~/.claude-billing.conf"

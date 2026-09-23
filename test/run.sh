@@ -448,6 +448,52 @@ uninstall_reports_failed_secret_deletion() (
   esac
 )
 
+bedrock_edits_survive_switching_away_and_back() (
+  HOME="$TEST_ROOT/bedrock-round-trip"
+  export HOME
+  # shellcheck source=../claude_billing.sh
+  . "$SCRIPT"
+  _CB_PLATFORM="windows"
+
+  mkdir -p "$HOME/.claude"
+  printf '%s' '{"env":{}}' > "$HOME/.claude/settings.json"
+  {
+    printf '%s\n' 'CLAUDE_BILLING_REGION="us-east-1"'
+    printf '%s\n' 'CLAUDE_BILLING_SONNET="old-sonnet"'
+    printf '%s\n' 'CLAUDE_BILLING_OPUS="old-opus"'
+    printf '%s\n' 'CLAUDE_BILLING_HAIKU="old-haiku"'
+    printf '%s\n' 'CLAUDE_BILLING_FABLE=""'
+    printf '%s\n' 'CLAUDE_BILLING_AWS_PROFILE_MODE="inherit"'
+    printf '%s\n' 'CLAUDE_BILLING_AWS_PROFILE=""'
+  } > "$HOME/.claude-billing.conf"
+  _cb_cred_file_store "anthropic-api-key" "sk-test"
+  _cb_cred_file_store "Claude Code-credentials-backup" "oauth-token"
+
+  claude_billing bedrock >/dev/null 2>&1 || return 1
+  # Edit the live Bedrock settings the way a user would, by hand.
+  jq '.env.ANTHROPIC_DEFAULT_OPUS_MODEL = "new-opus[1m]" |
+      .env.ANTHROPIC_DEFAULT_FABLE_MODEL = "new-fable" |
+      .env.AWS_REGION = "ap-southeast-1" |
+      .env.AWS_PROFILE = "work-aws"' \
+    "$HOME/.claude/settings.json" > "$HOME/.claude/s.tmp" && mv "$HOME/.claude/s.tmp" "$HOME/.claude/settings.json"
+
+  claude_billing api >/dev/null 2>&1 || return 1
+  claude_billing bedrock >/dev/null 2>&1 || return 1
+  env_of() { jq -r ".env.$1 // \"missing\"" "$HOME/.claude/settings.json"; }
+  assert_eq "new-opus[1m]" "$(env_of ANTHROPIC_DEFAULT_OPUS_MODEL)" "edited Opus model should survive API round trip" || return 1
+  assert_eq "new-fable" "$(env_of ANTHROPIC_DEFAULT_FABLE_MODEL)" "edited Fable model should survive" || return 1
+  assert_eq "old-sonnet" "$(env_of ANTHROPIC_DEFAULT_SONNET_MODEL)" "untouched Sonnet model should be kept" || return 1
+  assert_eq "ap-southeast-1" "$(env_of AWS_REGION)" "edited region should survive" || return 1
+  assert_eq "work-aws" "$(env_of AWS_PROFILE)" "hand-set AWS profile should survive" || return 1
+
+  jq '.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = "new-haiku" | del(.env.AWS_PROFILE)' \
+    "$HOME/.claude/settings.json" > "$HOME/.claude/s.tmp" && mv "$HOME/.claude/s.tmp" "$HOME/.claude/settings.json"
+  claude_billing subscription >/dev/null 2>&1 || return 1
+  claude_billing bedrock >/dev/null 2>&1 || return 1
+  assert_eq "new-haiku" "$(env_of ANTHROPIC_DEFAULT_HAIKU_MODEL)" "edited Haiku model should survive subscription round trip" || return 1
+  assert_eq "missing" "$(env_of AWS_PROFILE)" "removing the profile by hand should switch back to inheriting it"
+)
+
 bedrock_explicit_profile_is_shown_in_the_mode_indicator() (
   HOME="$TEST_ROOT/bedrock-explicit-indicator"
   export HOME
@@ -1373,6 +1419,8 @@ run_test "remove-account --yes skips the active account prompt" \
   remove_account_yes_skips_the_active_account_prompt
 run_test "uninstall reports failed secret deletion" \
   uninstall_reports_failed_secret_deletion
+run_test "Bedrock edits survive switching away and back" \
+  bedrock_edits_survive_switching_away_and_back
 run_test "Bedrock explicit profile is shown in the mode indicator" \
   bedrock_explicit_profile_is_shown_in_the_mode_indicator
 run_test "status resync uses the inherited Bedrock profile" \
