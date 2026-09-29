@@ -794,6 +794,7 @@ usage_identifies_itself_as_claude_code() (
   # And a version we cannot read must not produce a broken header.
   _CB_USAGE_USER_AGENT=""
   claude() { return 1; }
+  CLAUDE_BILLING_TEST_NOW=1786708900
   _cb_usage_json --refresh >/dev/null
   case "$(cat "$HOME/config")" in
     *"User-Agent: claude-code/$_CB_USAGE_UA_FALLBACK"*) : ;;
@@ -962,11 +963,21 @@ usage_serves_fresh_entries_from_cache() (
   _cb_usage_json >/dev/null
   _cb_usage_json >/dev/null
   first=$(wc -l < "$calls" | tr -d ' ')
+  # Ten minutes on: still inside the 15-minute TTL.
+  CLAUDE_BILLING_TEST_NOW=1786709400
+  _cb_usage_json >/dev/null
+  ten_min=$(wc -l < "$calls" | tr -d ' ')
   _cb_usage_json --refresh >/dev/null
-  second=$(wc -l < "$calls" | tr -d ' ')
+  forced=$(wc -l < "$calls" | tr -d ' ')
+  # Clicking Refresh again straight away is served from the fetch just made.
+  CLAUDE_BILLING_TEST_NOW=1786709430
+  _cb_usage_json --refresh >/dev/null
+  again=$(wc -l < "$calls" | tr -d ' ')
 
   assert_eq "1" "$first" "a fresh cache entry should not be refetched" || return 1
-  assert_eq "2" "$second" "--refresh should force a fetch"
+  assert_eq "1" "$ten_min" "an entry inside the TTL should not be refetched" || return 1
+  assert_eq "2" "$forced" "--refresh should force a fetch" || return 1
+  assert_eq "2" "$again" "--refresh within a minute of a fetch should not call the API"
 )
 
 usage_keeps_the_last_good_figures_when_a_fetch_fails() (
@@ -987,8 +998,8 @@ usage_keeps_the_last_good_figures_when_a_fetch_fails() (
   }
   _cb_usage_json >/dev/null
 
-  # Ten minutes later the endpoint is down: the cached figure stays, flagged.
-  CLAUDE_BILLING_TEST_NOW=1786709400
+  # Twenty minutes later the endpoint is down: the cached figure stays, flagged.
+  CLAUDE_BILLING_TEST_NOW=1786710000
   curl() { cat >/dev/null; printf '\n500'; }
   output=$(_cb_usage_json)
 
@@ -996,10 +1007,160 @@ usage_keeps_the_last_good_figures_when_a_fetch_fails() (
     "the last good usage should survive a failed refresh" || return 1
   assert_eq "33" "$(printf '%s' "$output" | jq -r '.[0].limits[0].percent')" \
     "cached percentages should be preserved" || return 1
-  assert_eq "600" "$(printf '%s' "$output" | jq -r '.[0].ageSeconds')" \
+  assert_eq "1200" "$(printf '%s' "$output" | jq -r '.[0].ageSeconds')" \
     "cached usage should report its age" || return 1
   assert_eq "api.anthropic.com is having trouble (HTTP 500)" "$(printf '%s' "$output" | jq -r '.[0].staleReason')" \
     "a stale figure should say why it was not refreshed"
+)
+
+usage_record_saves_status_line_limits_for_the_live_account() (
+  HOME="$TEST_ROOT/usage-record"
+  export HOME
+  # shellcheck source=../claude_billing.sh
+  . "$SCRIPT"
+  _CB_PLATFORM="windows"
+  mkdir -p "$HOME"
+  CLAUDE_BILLING_TEST_NOW=1786708800
+  export CLAUDE_BILLING_TEST_NOW
+  _cb_accounts_write "work personal" "work"
+  # The last switch predates the session's transcript.
+  touch -t 200001010000 "$HOME/.claude-billing-accounts"
+  printf '%s\n' '{}' > "$HOME/transcript.jsonl"
+
+  printf '%s' '{"model":{"display_name":"Opus"}}' | claude_billing usage-record
+  [ ! -e "$HOME/.claude-billing/usage-live.json" ] || {
+    printf '    status line JSON without rate_limits should record nothing\n' >&2
+    return 1
+  }
+  output=$(printf '%s' "{\"transcript_path\":\"$HOME/transcript.jsonl\",\"rate_limits\":{\"five_hour\":{\"used_percentage\":23.5,\"resets_at\":1786720000},\"seven_day\":{\"used_percentage\":41.2,\"resets_at\":1787000000}}}" \
+    | claude_billing usage-record)
+
+  assert_eq "" "$output" "usage-record runs inside the status line and must print nothing" || return 1
+  assert_eq "23.5" "$(jq -r '.work.fiveHour.used_percentage' "$HOME/.claude-billing/usage-live.json")" \
+    "the reading should be filed under the live account" || return 1
+  assert_eq "1786708800" "$(jq -r '.work.recordedAt' "$HOME/.claude-billing/usage-live.json")" \
+    "the reading should carry when it was recorded" || return 1
+  assert_eq "600" "$(file_mode "$HOME/.claude-billing/usage-live.json")" \
+    "the live usage file must not be world-readable"
+)
+
+usage_record_ignores_a_session_older_than_the_last_switch() (
+  HOME="$TEST_ROOT/usage-record-stale-session"
+  export HOME
+  # shellcheck source=../claude_billing.sh
+  . "$SCRIPT"
+  _CB_PLATFORM="windows"
+  mkdir -p "$HOME"
+  printf '%s\n' '{}' > "$HOME/transcript.jsonl"
+  _cb_accounts_write "work personal" "personal"
+  # A switch after the session began: that session still holds the old login,
+  # so its figures belong to some other account.
+  touch -t 209901010000 "$HOME/.claude-billing-accounts"
+
+  printf '%s' "{\"transcript_path\":\"$HOME/transcript.jsonl\",\"rate_limits\":{\"five_hour\":{\"used_percentage\":90,\"resets_at\":1786720000}}}" \
+    | claude_billing usage-record
+  rc=$?
+
+  assert_eq "0" "$rc" "usage-record must never fail the status line" || return 1
+  [ ! -e "$HOME/.claude-billing/usage-live.json" ] || {
+    printf '    a session older than the last switch must not be attributed to the new account\n' >&2
+    return 1
+  }
+)
+
+usage_prefers_a_live_reading_over_polling() (
+  HOME="$TEST_ROOT/usage-live-overlay"
+  export HOME
+  # shellcheck source=../claude_billing.sh
+  . "$SCRIPT"
+  _CB_PLATFORM="windows"
+  mkdir -p "$HOME/.claude-billing"
+  _cb_cred_store "Claude Code-credentials" \
+    '{"claudeAiOauth":{"accessToken":"live-token","expiresAt":1786799999000}}'
+  printf '0' > "$HOME/calls"
+  curl() {
+    cat >/dev/null
+    printf '%s' "$(( $(cat "$HOME/calls") + 1 ))" > "$HOME/calls"
+    printf '%s' '{"limits":[{"kind":"session","group":"session","percent":10,"severity":"normal","is_active":true},{"kind":"weekly_all","group":"weekly","percent":20,"severity":"normal","is_active":true},{"kind":"weekly_opus","group":"weekly","percent":30,"severity":"normal","is_active":true}]}'
+    printf '\n200'
+  }
+  CLAUDE_BILLING_TEST_NOW=1786708800
+  export CLAUDE_BILLING_TEST_NOW
+  _cb_usage_json >/dev/null
+
+  # Twenty minutes on (past the TTL), Claude Code's status line saw newer figures.
+  printf '%s' '{"_legacy":{"recordedAt":1786709900,"fiveHour":{"used_percentage":55.4,"resets_at":1786720000},"sevenDay":{"used_percentage":61,"resets_at":1787000000}}}' \
+    > "$HOME/.claude-billing/usage-live.json"
+  CLAUDE_BILLING_TEST_NOW=1786710000
+  output=$(_cb_usage_json)
+
+  assert_eq "1" "$(cat "$HOME/calls")" \
+    "a fresh live reading should stand in for a poll" || return 1
+  assert_eq "55" "$(printf '%s' "$output" | jq -r '.[0].limits[] | select(.kind == "session") | .percent')" \
+    "the live 5-hour figure should replace the polled session limit" || return 1
+  assert_eq "61" "$(printf '%s' "$output" | jq -r '.[0].limits[] | select(.kind == "weekly_all") | .percent')" \
+    "the live 7-day figure should replace the polled weekly limit" || return 1
+  assert_eq "30" "$(printf '%s' "$output" | jq -r '.[0].limits[] | select(.kind == "weekly_opus") | .percent')" \
+    "limits the status line doesn't carry should keep their polled values" || return 1
+  assert_eq "100" "$(printf '%s' "$output" | jq -r '.[0].ageSeconds')" \
+    "freshness should follow the live reading" || return 1
+
+  # A window whose reset has passed describes nothing; fall back to the poll.
+  printf '%s' '{"_legacy":{"recordedAt":1786709900,"fiveHour":{"used_percentage":99,"resets_at":1786709950}}}' \
+    > "$HOME/.claude-billing/usage-live.json"
+  assert_eq "10" "$(_cb_usage_json | jq -r '.[0].limits[] | select(.kind == "session") | .percent')" \
+    "an expired live window must not override the polled figure" || return 1
+
+  # Past the full TTL the other figures are too old; poll despite a live reading.
+  printf '%s' '{"_legacy":{"recordedAt":1786712400,"fiveHour":{"used_percentage":70,"resets_at":1786720000}}}' \
+    > "$HOME/.claude-billing/usage-live.json"
+  CLAUDE_BILLING_TEST_NOW=1786712500
+  output=$(_cb_usage_json)
+  assert_eq "2" "$(cat "$HOME/calls")" \
+    "a live reading must not stand in for a poll past the full TTL" || return 1
+  assert_eq "10" "$(printf '%s' "$output" | jq -r '.[0].limits[] | select(.kind == "session") | .percent')" \
+    "a poll newer than the live reading should win"
+)
+
+usage_asks_for_the_credit_balance_at_most_hourly() (
+  HOME="$TEST_ROOT/usage-credits-ttl"
+  export HOME
+  # shellcheck source=../claude_billing.sh
+  . "$SCRIPT"
+  _CB_PLATFORM="windows"
+  mkdir -p "$HOME"
+  _cb_cred_store "Claude Code-credentials" \
+    '{"claudeAiOauth":{"accessToken":"live-token","expiresAt":1786799999000}}'
+  printf '%s' '{"oauthAccount":{"organizationUuid":"org-uuid-1"}}' > "$HOME/.claude.json"
+  printf '0' > "$HOME/credit-calls"
+  curl() {
+    config=$(cat)
+    case "$config" in
+      *prepaid/credits*)
+        printf '%s' "$(( $(cat "$HOME/credit-calls") + 1 ))" > "$HOME/credit-calls"
+        printf '%s' '{"balance":{"credits":{"amount_minor":500,"exponent":2}}}'
+        printf '\n200'
+        ;;
+      *)
+        printf '%s' '{"limits":[{"kind":"session","percent":10,"severity":"normal","is_active":true}]}'
+        printf '\n200'
+        ;;
+    esac
+  }
+  CLAUDE_BILLING_TEST_NOW=1786708800
+  export CLAUDE_BILLING_TEST_NOW
+  _cb_usage_json >/dev/null
+  CLAUDE_BILLING_TEST_NOW=1786709800
+  output=$(_cb_usage_json)
+
+  assert_eq "1" "$(cat "$HOME/credit-calls")" \
+    "a usage poll inside the hour should not re-ask for the balance" || return 1
+  assert_eq "5" "$(printf '%s' "$output" | jq -r '.[0].credits.balance')" \
+    "the carried-over balance should still be reported" || return 1
+  CLAUDE_BILLING_TEST_NOW=1786712500
+  _cb_usage_json >/dev/null
+  assert_eq "2" "$(cat "$HOME/credit-calls")" \
+    "the balance should be re-read once it is an hour old"
 )
 
 usage_reports_a_missing_login_without_calling_the_api() (
@@ -1446,6 +1607,14 @@ run_test "status resync uses the inherited Bedrock profile" \
   status_resync_uses_the_inherited_bedrock_profile
 run_test "JSON status exposes menu bar state" \
   json_status_exposes_menu_bar_state
+run_test "usage record saves status line limits for the live account" \
+  usage_record_saves_status_line_limits_for_the_live_account
+run_test "usage record ignores a session older than the last switch" \
+  usage_record_ignores_a_session_older_than_the_last_switch
+run_test "usage prefers a live reading over polling" \
+  usage_prefers_a_live_reading_over_polling
+run_test "usage asks for the credit balance at most hourly" \
+  usage_asks_for_the_credit_balance_at_most_hourly
 run_test "usage reports limits for each account" \
   usage_reports_limits_for_each_account
 run_test "usage reports the prepaid credit balance" \

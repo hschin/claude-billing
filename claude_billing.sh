@@ -930,7 +930,7 @@ _cb_credits_fetch_one() {
 # Fetch usage for one account. Always prints one JSON object; status is ok,
 # no-token, token-expired, or unavailable.
 _cb_usage_fetch_one() {
-  local name="${1:-}" creds token expires_ms now_ms body http_status response
+  local name="${1:-}" prev="${2:-}" creds token expires_ms now_ms body http_status response
   creds=$(_cb_usage_credentials "$name")
   if [[ -z "$creds" ]]; then
     jq -n --arg account "$name" '{account: $account, status: "no-token"}'
@@ -978,15 +978,26 @@ _cb_usage_fetch_one() {
        + (if $retry > 0 then {retryAfter: $retry} else {} end)'
     return 0
   fi
-  local credits
-  credits=$(_cb_credits_fetch_one "$token" "$(_cb_usage_org_uuid "$name")")
+  # The balance moves far more slowly than the plan limits, so it is asked for
+  # at most once per CLAUDE_BILLING_CREDITS_TTL and carried over in between —
+  # otherwise every usage read costs two requests against the same budget.
+  local credits credits_at now
+  now=$(_cb_now)
+  credits_at=$(printf '%s' "$prev" | jq -r '.creditsFetchedAt // empty' 2>/dev/null)
+  if [[ "$credits_at" =~ ^[0-9]+$ ]] && (( now - credits_at < ${CLAUDE_BILLING_CREDITS_TTL:-3600} )); then
+    credits=$(printf '%s' "$prev" | jq -c '.credits // null' 2>/dev/null)
+  else
+    credits=$(_cb_credits_fetch_one "$token" "$(_cb_usage_org_uuid "$name")")
+    credits_at="$now"
+  fi
   [[ -n "$credits" ]] || credits="null"
-  printf '%s' "$body" | jq -c --arg account "$name" --argjson fetched "$(_cb_now)" \
-    --argjson credits "$credits" '
+  printf '%s' "$body" | jq -c --arg account "$name" --argjson fetched "$now" \
+    --argjson credits "$credits" --argjson credits_at "$credits_at" '
     {
       account: $account,
       status: "ok",
       fetchedAt: $fetched,
+      creditsFetchedAt: $credits_at,
       limits: [ (.limits // [])[]
                 | select(type == "object" and .percent != null)
                 | {kind: (.kind // "unknown"), group: (.group // ""),
@@ -1022,6 +1033,110 @@ _cb_usage_token_expired() {
   if (( expires_ms <= now_ms )); then printf 'true'; else printf 'false'; fi
 }
 
+# --- Live usage from Claude Code's status line ---
+#
+# Claude Code hands its status line command the plan usage it reads off every
+# API response (`rate_limits.five_hour` / `seven_day`: used_percentage and
+# resets_at epoch seconds; subscribers only, and only after the first response
+# of a session). `usage-record` saves that per account in
+# ~/.claude-billing/usage-live.json, and _cb_usage_json lays it over the polled
+# figures — so while Claude Code is in use the headline numbers are current
+# without spending a request on the rate-limited usage endpoint.
+
+_cb_usage_live_file() {
+  printf '%s' "$HOME/.claude-billing/usage-live.json"
+}
+
+# Epoch seconds a file was created, or nothing when the platform can't say.
+# GNU stat first: on Linux `stat -f` is valid and reports the FILESYSTEM.
+_cb_file_birth() {
+  local t
+  t=$(stat -c %W "$1" 2>/dev/null) || t=$(stat -f %B "$1" 2>/dev/null) || t=""
+  [[ "$t" =~ ^[0-9]+$ ]] && (( t > 0 )) && printf '%s' "$t"
+}
+
+_cb_file_mtime() {
+  local t
+  t=$(stat -c %Y "$1" 2>/dev/null) || t=$(stat -f %m "$1" 2>/dev/null) || t=""
+  [[ "$t" =~ ^[0-9]+$ ]] && printf '%s' "$t"
+}
+
+# Read status line JSON on stdin and save its rate_limits under the live
+# account. Silent and always succeeds: it runs inside the user's status line.
+#
+# Attribution is the hard part. The JSON doesn't say which login produced it,
+# and a Claude Code session started before a switch keeps the login it started
+# with, so its figures would land under the newly active account. Every switch
+# rewrites ~/.claude-billing-accounts, so a session whose transcript is older
+# than that file is ignored — as is one whose age can't be told. Wrongly
+# dropping a reading only costs a poll; wrongly keeping one shows another
+# account's usage.
+_cb_usage_record() {
+  local input live key accounts_file transcript born switched file cache tmp
+  input=$(cat) || return 0
+  command -v jq >/dev/null 2>&1 || return 0
+  live=$(printf '%s' "$input" | jq -c '
+    (.rate_limits // null) | select(type == "object")
+    | {fiveHour: .five_hour, sevenDay: .seven_day}
+    | select(.fiveHour != null or .sevenDay != null)' 2>/dev/null)
+  [[ -n "$live" ]] || return 0
+  accounts_file="$HOME/.claude-billing-accounts"
+  key="_legacy"
+  if [[ -n "$(_cb_accounts_list 2>/dev/null)" ]]; then
+    key=$(_cb_active_get)
+    [[ -n "$key" ]] || return 0
+    transcript=$(printf '%s' "$input" | jq -r '.transcript_path // empty' 2>/dev/null)
+    born=""
+    [[ -n "$transcript" && -f "$transcript" ]] && born=$(_cb_file_birth "$transcript")
+    switched=$(_cb_file_mtime "$accounts_file")
+    [[ -n "$born" && -n "$switched" ]] || return 0
+    (( born >= switched )) || return 0
+  fi
+  file=$(_cb_usage_live_file)
+  mkdir -p "$(dirname "$file")" 2>/dev/null || return 0
+  cache='{}'
+  [[ -f "$file" ]] && cache=$(jq -c '. // {}' "$file" 2>/dev/null || printf '{}')
+  tmp=$(mktemp "${file}.XXXXXX" 2>/dev/null) || return 0
+  if printf '%s' "$cache" | jq -c --arg k "$key" --argjson v "$live" --argjson now "$(_cb_now)" \
+       '.[$k] = ($v + {recordedAt: $now})' > "$tmp" 2>/dev/null; then
+    chmod 600 "$tmp" 2>/dev/null
+    mv "$tmp" "$file" 2>/dev/null || rm -f "$tmp"
+  else
+    rm -f "$tmp"
+  fi
+  return 0
+}
+
+# Lay a live reading over one usage entry: its 5-hour window replaces the
+# `session` limit and its 7-day window `weekly_all`; per-model limits, spend,
+# and credits stay as polled. Only a reading newer than the entry's fetch wins,
+# and a window whose reset has passed is ignored (it no longer describes
+# anything). Freshness follows the headline figure, so ageSeconds becomes the
+# reading's age and any refresh failure note is dropped — the other figures are
+# at most CLAUDE_BILLING_USAGE_FULL_TTL old, because that caps how long a live
+# reading may stand in for a poll.
+_cb_usage_overlay_live() {
+  local entry="$1" live="$2" now="$3"
+  [[ -n "$live" ]] || { printf '%s' "$entry"; return 0; }
+  printf '%s' "$entry" | jq -c --argjson live "$live" --argjson now "$now" '
+    def window($w; $kind; $group):
+      if ($w | type) == "object" and ($w.used_percentage | type) == "number"
+         and (($w.resets_at // 0) > $now)
+      then [{kind: $kind, group: $group, percent: ($w.used_percentage | round),
+             severity: "normal", resetsAt: ($w.resets_at | floor | todate), isActive: true}]
+      else [] end;
+    (window($live.fiveHour; "session"; "session") + window($live.sevenDay; "weekly_all"; "weekly")) as $fresh
+    | if ($fresh | length) == 0 then .
+      elif .status == "ok" and ((.fetchedAt // 0) >= $live.recordedAt) then .
+      else
+        (if .status == "ok" then . else {account: .account, status: "ok", limits: [], spend: null, credits: null} end)
+        | .limits = ([(.limits // [])[] | select(.kind as $k | $fresh | map(.kind) | index($k) | not)]
+                     + [$fresh[] as $f | ($f + {severity: ([(.limits // [])[] | select(.kind == $f.kind) | .severity][0] // "normal")})])
+        | del(.staleReason)
+        | . + {liveAt: $live.recordedAt, ageSeconds: ($now - $live.recordedAt)}
+      end' 2>/dev/null || printf '%s' "$entry"
+}
+
 # _cb_usage_json [--refresh] [only-account]
 #
 # `only-account` restricts NETWORK calls to that one account; the others are
@@ -1030,28 +1145,53 @@ _cb_usage_token_expired() {
 # spending its limits, so polling it buys nothing and costs the request budget
 # of the account you actually care about. Pass "-" for the legacy, account-less
 # entry.
+#
+# When to ask the network, per account:
+# - never while the cached entry is younger than CLAUDE_BILLING_USAGE_TTL
+#   (default 900s), or younger than CLAUDE_BILLING_USAGE_FULL_TTL (default
+#   3600s) while a live status line reading is itself younger than the TTL —
+#   that reading already keeps the headline current;
+# - --refresh skips both, but not within CLAUDE_BILLING_USAGE_MIN_REFRESH
+#   (default 60s) of the last fetch, so repeated clicks don't become requests;
+# - never inside a rate-limit backoff, whatever the flags.
 _cb_usage_json() {
-  local force="${1:-}" only="${2:-}" ttl="${CLAUDE_BILLING_USAGE_TTL:-300}" cache_file cache entry name now
+  local force="${1:-}" only="${2:-}" ttl="${CLAUDE_BILLING_USAGE_TTL:-900}"
+  local full_ttl="${CLAUDE_BILLING_USAGE_FULL_TTL:-3600}" min_refresh="${CLAUDE_BILLING_USAGE_MIN_REFRESH:-60}"
+  local cache_file cache entry name now live_all live live_at live_fresh cached
   local names="" out="" fetched_at age skip key retry_at retry_in retry_note
   cache_file=$(_cb_usage_cache_file)
   now=$(_cb_now)
   cache='{}'
   [[ -f "$cache_file" ]] && cache=$(jq -c '. // {}' "$cache_file" 2>/dev/null || printf '{}')
+  live_all='{}'
+  [[ -f "$(_cb_usage_live_file)" ]] && live_all=$(jq -c '. // {}' "$(_cb_usage_live_file)" 2>/dev/null || printf '{}')
+  [[ -n "$live_all" ]] || live_all='{}'
   names=$(_cb_accounts_list)
   [[ -z "$names" ]] && names="-"
   for name in $(printf '%s' "$names"); do
     [[ "$name" == "-" ]] && name=""
     key="${name:-_legacy}"
     entry=$(printf '%s' "$cache" | jq -c --arg k "$key" '.[$k] // empty' 2>/dev/null)
+    live=$(printf '%s' "$live_all" | jq -c --arg k "$key" '.[$k] // empty' 2>/dev/null)
+    live_at=$(printf '%s' "$live" | jq -r '.recordedAt // empty' 2>/dev/null)
+    live_fresh=""
+    [[ "$live_at" =~ ^[0-9]+$ ]] && (( now - live_at < ttl )) && live_fresh="yes"
     fetched_at=$(printf '%s' "$entry" | jq -r '.fetchedAt // empty' 2>/dev/null)
     age=""
     if [[ -n "$fetched_at" ]] && [[ "$fetched_at" =~ ^[0-9]+$ ]]; then
       age=$(( now - fetched_at ))
     fi
-    if [[ "$force" != "--refresh" ]] && [[ -n "$age" ]] && (( age < ttl )); then
-      out="${out}$(printf '%s' "$entry" | jq -c --argjson age "$age" \
-        --argjson expired "$(_cb_usage_token_expired "$name")" \
-        '. + {ageSeconds: $age, tokenExpired: $expired}')"
+    cached=""
+    if [[ -n "$age" ]]; then
+      if [[ "$force" == "--refresh" ]]; then
+        (( age < min_refresh )) && cached="yes"
+      elif (( age < ttl )) || { [[ -n "$live_fresh" ]] && (( age < full_ttl )); }; then
+        cached="yes"
+      fi
+    fi
+    if [[ -n "$cached" ]]; then
+      entry=$(printf '%s' "$entry" | jq -c --argjson age "$age" '. + {ageSeconds: $age}')
+      out="${out}$(_cb_usage_emit "$entry" "$live" "$now" "$name")"
       continue
     fi
     # A rate limit is a request to stop asking, so it outranks --refresh: the
@@ -1066,13 +1206,13 @@ _cb_usage_json() {
     if (( retry_in > 0 )); then
       retry_note="rate limited by api.anthropic.com — retrying in $(( (retry_in + 59) / 60 )) min"
       if [[ -n "$entry" ]]; then
-        out="${out}$(printf '%s' "$entry" | jq -c --argjson age "${age:-0}" --arg why "$retry_note" \
-          --argjson expired "$(_cb_usage_token_expired "$name")" \
-          '. + {ageSeconds: $age, staleReason: $why, tokenExpired: $expired}')"
+        entry=$(printf '%s' "$entry" | jq -c --argjson age "${age:-0}" --arg why "$retry_note" \
+          '. + {ageSeconds: $age, staleReason: $why}')
       else
-        out="${out}$(jq -n --arg account "$name" --arg why "$retry_note" \
-          '{account: $account, status: "unavailable", detail: $why}')"
+        entry=$(jq -n -c --arg account "$name" --arg why "$retry_note" \
+          '{account: $account, status: "unavailable", detail: $why}')
       fi
+      out="${out}$(_cb_usage_emit "$entry" "$live" "$now" "$name")"
       continue
     fi
     skip=""
@@ -1083,15 +1223,14 @@ _cb_usage_json() {
     fi
     if [[ -n "$skip" ]]; then
       if [[ -n "$entry" ]]; then
-        out="${out}$(printf '%s' "$entry" | jq -c --argjson age "${age:-0}" \
-          --argjson expired "$(_cb_usage_token_expired "$name")" \
-          '. + {ageSeconds: $age, tokenExpired: $expired}')"
+        entry=$(printf '%s' "$entry" | jq -c --argjson age "${age:-0}" '. + {ageSeconds: $age}')
       else
-        out="${out}$(jq -n --arg account "$name" '{account: $account, status: "not-polled"}')"
+        entry=$(jq -n -c --arg account "$name" '{account: $account, status: "not-polled"}')
       fi
+      out="${out}$(_cb_usage_emit "$entry" "$live" "$now" "$name")"
       continue
     fi
-    entry=$(_cb_usage_fetch_one "$name")
+    entry=$(_cb_usage_fetch_one "$name" "$entry")
     # A failed fetch keeps the last good numbers visible, marked with their age.
     if [[ "$(printf '%s' "$entry" | jq -r '.status')" != "ok" ]] && [[ -n "$age" ]]; then
       entry=$(jq -n --argjson old "$(printf '%s' "$cache" | jq -c --arg k "${name:-_legacy}" '.[$k]')" \
@@ -1113,9 +1252,8 @@ _cb_usage_json() {
     # retryAfter is a property of the failed request rather than the figures.
     cache=$(printf '%s' "$cache" | jq -c --arg k "$key" \
       --argjson v "$(printf '%s' "$entry" | jq -c 'del(.ageSeconds, .staleReason, .retryAfter)')" '.[$k] = $v')
-    out="${out}$(printf '%s' "$entry" | jq -c \
-      --argjson expired "$(_cb_usage_token_expired "$name")" \
-      '. + {ageSeconds: (.ageSeconds // 0), tokenExpired: $expired}')"
+    entry=$(printf '%s' "$entry" | jq -c '. + {ageSeconds: (.ageSeconds // 0)}')
+    out="${out}$(_cb_usage_emit "$entry" "$live" "$now" "$name")"
   done
   mkdir -p "$(dirname "$cache_file")" 2>/dev/null
   if printf '%s' "$cache" > "${cache_file}.tmp" 2>/dev/null; then
@@ -1123,6 +1261,12 @@ _cb_usage_json() {
     mv "${cache_file}.tmp" "$cache_file" 2>/dev/null || rm -f "${cache_file}.tmp"
   fi
   printf '%s' "$out" | jq -s -c '.'
+}
+
+# One output entry: the live overlay plus the locally computed token state.
+_cb_usage_emit() {
+  _cb_usage_overlay_live "$1" "$2" "$3" | jq -c \
+    --argjson expired "$(_cb_usage_token_expired "$4")" '. + {tokenExpired: $expired}'
 }
 
 _cb_usage_lines() {
@@ -1663,6 +1807,12 @@ claude_billing() {
       echo "Source: Claude's unofficial OAuth usage endpoint — figures may lag /usage in Claude Code"
       ;;
 
+    usage-record)
+      # Fed the status line's JSON on stdin; see _cb_usage_record.
+      _cb_usage_record
+      return 0
+      ;;
+
     sso)
       _cb_require_cmd jq "install with: brew install jq / apt install jq / winget install jqlang.jq" || return 1
       local sso_only
@@ -1759,6 +1909,7 @@ claude_billing() {
       echo "  add-account <name>     Register a claude.ai subscription account"
       echo "  remove-account <name>  Remove an account and its stored token"
       echo "  usage [--json]         Show subscription plan usage (add --refresh to force)"
+      echo "  usage-record           Save plan usage from Claude Code's status line JSON (stdin)"
       echo "  sso [--json]           Show AWS SSO session expiry for Bedrock profiles"
       echo "  sso-login <session>    Refresh an expired AWS SSO login"
       echo "  desktop [name]         Show or switch the Claude.app desktop login (macOS)"

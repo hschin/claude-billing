@@ -120,6 +120,7 @@ claude-billing accounts              # list registered subscription accounts
 claude-billing add-account <name>    # register a claude.ai subscription account
 claude-billing remove-account <name> # remove an account and its stored token
 claude-billing usage                 # show subscription plan usage (--refresh forces a fetch)
+claude-billing usage-record          # save usage from Claude Code's status line JSON on stdin
 claude-billing sso                   # show AWS SSO session expiry for your Bedrock profiles
 claude-billing sso-login <session>   # refresh an expired AWS SSO login
 claude-billing desktop [name]        # show or switch the Claude.app desktop login (macOS)
@@ -155,7 +156,7 @@ The submenu breaks down every registered account: a bar and percentage per limit
 
 When an account's access token has expired, its bars go grey and the percentages blank out: the last figures read are no longer current, and a stale percentage shown as a live one is worse than none. A line under them asks you to switch to that account once, which is what lets Claude Code refresh the token. The credit balance stays, since money in the account doesn't go stale the way a rolling window does. Dimming means exactly that one thing, so a working account's figures are shown at full strength.
 
-Everything in the menu refreshes on the same five-minute beat, and opening the menu refreshes the billing state immediately, so what you see when you look is current; **Refresh** forces everything, usage included. The numbers come from an unofficial endpoint — see [Subscription plan usage](#subscription-plan-usage) for the caveats.
+Everything in the menu refreshes on the same five-minute beat, and opening the menu refreshes the billing state immediately, so what you see when you look is current. The usage beat only reads what claude-billing already has — the CLI decides when the endpoint is worth a request — and **Refresh** forces a fetch, usage included. With [live figures from the status line](#live-figures-from-claude-codes-status-line-recommended) wired up, the headline number moves with every Claude Code reply. The numbers come from an unofficial endpoint — see [Subscription plan usage](#subscription-plan-usage) for the caveats.
 
 For Bedrock, an explicit configured AWS profile is deterministic, and the Bedrock row names the profile a switch would select. A login item does not normally inherit a terminal's `AWS_PROFILE`, so inherited profile mode usually resolves to `default` when switched from the menu. Configure an explicit profile with `claude-billing config` if the menu should always select a particular AWS account.
 
@@ -188,7 +189,18 @@ Credentials stay read-only. An account's stored access token is used exactly as 
 
 Requests identify themselves as Claude Code, whose endpoint this is; claude-billing's own name drew rate limits at a five-minute cadence. If the API does rate-limit a read, claude-billing waits as long as it asks (or fifteen minutes) before trying that account again — including when you click Refresh, since asking again is what earns a throttling — and says so in the meantime.
 
-Results are cached in `~/.claude-billing/usage-cache.json` (chmod 600) for five minutes, so repeated calls and the menu bar's polling don't hammer the endpoint. Override with `CLAUDE_BILLING_USAGE_TTL` (seconds), or force a fetch with `claude-billing usage --refresh`. If a refresh fails, the last good figures stay visible, labelled with when they were last updated and why they weren't refreshed. `claude-billing usage --json` returns the same data for scripts.
+Results are cached in `~/.claude-billing/usage-cache.json` (chmod 600) for fifteen minutes, so repeated calls and the menu bar's polling don't hammer the endpoint. Override with `CLAUDE_BILLING_USAGE_TTL` (seconds), or force a fetch with `claude-billing usage --refresh` — though a forced fetch within a minute of the last one (`CLAUDE_BILLING_USAGE_MIN_REFRESH`) is served from the cache, so repeated clicks don't turn into requests. The prepaid credit balance changes slowly and is asked for at most hourly (`CLAUDE_BILLING_CREDITS_TTL`). If a refresh fails, the last good figures stay visible, labelled with when they were last updated and why they weren't refreshed. `claude-billing usage --json` returns the same data for scripts.
+
+### Live figures from Claude Code's status line (recommended)
+
+Claude Code already knows your 5-hour and 7-day usage — it reads them off every response — and hands them to your [status line](https://code.claude.com/docs/en/statusline) command as `rate_limits` (Pro and Max subscribers, Claude Code 2.1.251+). Pipe that JSON to claude-billing and the menu bar and `claude-billing usage` show those two figures without a single extra request, updated with every reply:
+
+```sh
+# in your status line script, after reading stdin into $input
+printf '%s' "$input" | zsh -c '. ~/.claude-billing/claude_billing.sh && claude_billing usage-record' >/dev/null 2>&1 &
+```
+
+It runs in the background, prints nothing, and never fails the status line. While a live reading is under fifteen minutes old, the endpoint is polled only hourly (`CLAUDE_BILLING_USAGE_FULL_TTL`) for the figures the status line doesn't carry: per-model limits, extra-usage spend, and the credit balance. Readings are stored in `~/.claude-billing/usage-live.json` (chmod 600) under the account that is live at the time. A Claude Code session started before your last account switch still holds the old login, so its readings are ignored rather than credited to the new account.
 
 ## Multiple subscription accounts
 
@@ -362,7 +374,8 @@ If the credential store rejects a requested secret deletion, uninstall finishes 
 | `~/.aws/sso/cache/*.json` | Read only, for AWS SSO access-token expiry |
 | `~/.claude-billing-accounts` | Registry of named subscription accounts and which one is active |
 | `~/.claude-billing-mode` | Current billing mode, for shell prompt indicators (resynced by `status`) |
-| `~/.claude-billing/usage-cache.json` | Cached subscription plan usage, chmod 600 (five-minute TTL) |
+| `~/.claude-billing/usage-cache.json` | Cached subscription plan usage, chmod 600 (fifteen-minute TTL) |
+| `~/.claude-billing/usage-live.json` | Latest 5-hour/7-day usage recorded from Claude Code's status line, chmod 600 |
 | `~/.claude-billing/claude_billing.sh` | The installed script |
 | `~/.claude-billing/desktop/<name>/` | Stashed Claude.app desktop logins (contents encrypted by Claude Safe Storage) |
 | `~/Library/Application Support/Claude/` | Desktop app profile — `Cookies` and `config.json` swapped by `desktop <name>` (macOS) |

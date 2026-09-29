@@ -788,12 +788,14 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             self?.refreshState(showError: false)
         }
         // Usage can involve a network call, so it runs on its own slower timer
-        // and never gates the billing state the menu is really about. Each tick
-        // forces a fetch: the interval already matches the CLI's cache TTL, and
-        // a cached read here would stall the meters for a whole extra interval.
+        // and never gates the billing state the menu is really about. Ticks do
+        // NOT force a fetch: the CLI decides when the rate-limited endpoint is
+        // worth a request (its cache TTL, plus live figures Claude Code's status
+        // line records for free), so a tick is usually a local read that picks
+        // up the latest live reading. Only the Refresh item forces.
         refreshUsage(force: false)
         usageTimer = Timer.scheduledTimer(withTimeInterval: refreshInterval, repeats: true) { [weak self] _ in
-            self?.refreshUsage(force: true)
+            self?.refreshUsage(force: false)
         }
     }
 
